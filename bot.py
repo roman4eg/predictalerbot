@@ -47,7 +47,13 @@ class Subscription:
 class WalletWatch:
     chat_id: int
     address: str
+    label: str = ""
     known_position_uids: set[str] = field(default_factory=set)
+
+    @property
+    def display_name(self) -> str:
+        short = f"{self.address[:6]}...{self.address[-4:]}"
+        return f"{self.label} ({short})" if self.label else short
 
 
 # Active subscriptions: key = (chat_id, market_id, outcome_name)
@@ -73,7 +79,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Команди:\n"
         "/look <посилання на подію> — підписатись на оновлення стакану\n"
         "/subs — список активних підписок на стакан\n\n"
-        "/watch <адреса гаманця> — стежити за позиціями гаманця\n"
+        "/watch <адреса> [назва] — стежити за позиціями гаманця\n"
         "/wallets — список гаманців під стеженням\n"
     )
 
@@ -149,15 +155,19 @@ async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Використання: /watch <адреса гаманця>")
+        await update.message.reply_text(
+            "Використання: /watch <адреса гаманця> [назва]\n"
+            "Приклад: /watch 0x77F3...aEE4 mywallet"
+        )
         return
 
     address = context.args[0].strip()
+    label = " ".join(context.args[1:]).strip() if len(context.args) > 1 else ""
     chat_id = update.effective_chat.id
     key = (chat_id, address)
 
     if key in wallet_watches:
-        await update.message.reply_text(f"Ви вже стежите за цим гаманцем.")
+        await update.message.reply_text("Ви вже стежите за цим гаманцем.")
         return
 
     await update.message.reply_text(f"Завантажую поточні позиції: `{address}` ...", parse_mode="Markdown")
@@ -170,13 +180,14 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     known_uids = {p.uid for p in positions}
-    wallet_watches[key] = WalletWatch(
+    w = WalletWatch(
         chat_id=chat_id,
         address=address,
+        label=label,
         known_position_uids=known_uids,
     )
+    wallet_watches[key] = w
 
-    short_addr = f"{address[:6]}...{address[-4:]}"
     unwatch_btn = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Припинити стеження", callback_data=f"unwatch:{address}")]]
     )
@@ -193,7 +204,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         pos_text = "  Позицій поки немає."
 
     await update.message.reply_text(
-        f"Стеження за гаманцем `{short_addr}` увімкнено\n\n"
+        f"Стеження за гаманцем *{w.display_name}* увімкнено\n\n"
         f"Поточні позиції ({len(positions)}):\n{pos_text}\n\n"
         f"Ви отримаєте сповіщення при появі нових позицій.",
         reply_markup=unwatch_btn,
@@ -212,10 +223,9 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     lines = []
     buttons = []
     for i, ((_, addr), w) in enumerate(user_watches.items()):
-        short = f"{addr[:6]}...{addr[-4:]}"
-        lines.append(f"{i + 1}. `{short}` — {len(w.known_position_uids)} позицій")
+        lines.append(f"{i + 1}. *{w.display_name}* — {len(w.known_position_uids)} позицій")
         buttons.append(
-            [InlineKeyboardButton(f"Припинити: {short}", callback_data=f"unwatch:{addr}")]
+            [InlineKeyboardButton(f"Припинити: {w.display_name}", callback_data=f"unwatch:{addr}")]
         )
 
     await update.message.reply_text(
@@ -322,10 +332,10 @@ async def _handle_unwatch(query) -> None:
     key = (chat_id, address)
     w = wallet_watches.pop(key, None)
 
-    short = f"{address[:6]}...{address[-4:]}"
     if w:
-        await query.edit_message_text(f"Стеження за гаманцем {short} припинено.")
+        await query.edit_message_text(f"Стеження за гаманцем {w.display_name} припинено.")
     else:
+        short = f"{address[:6]}...{address[-4:]}"
         await query.edit_message_text(f"Гаманець {short} не знайдено (вже видалено).")
 
 
@@ -424,7 +434,6 @@ async def poll_wallets(app: Application) -> None:
             w.known_position_uids = current_uids
             new_positions = [p for p in positions if p.uid in new_uids]
 
-            short_addr = f"{w.address[:6]}...{w.address[-4:]}"
             unwatch_btn = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("Припинити стеження", callback_data=f"unwatch:{w.address}")]]
             )
@@ -434,7 +443,7 @@ async def poll_wallets(app: Application) -> None:
                     await app.bot.send_message(
                         chat_id=w.chat_id,
                         text=(
-                            f"Нова позиція — гаманець `{short_addr}`\n\n"
+                            f"Нова позиція — *{w.display_name}*\n\n"
                             f"Подія: *{p.market_title}*\n"
                             f"Outcome: *{p.outcome_name}*\n"
                             f"Шейрсів: *{p.size:.2f}*\n"

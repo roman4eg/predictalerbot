@@ -1,5 +1,9 @@
+import logging
+
 import httpx
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 API_BASE = "https://api.predict.fun"
@@ -43,10 +47,25 @@ class Position:
     size: float
     avg_price: float
     value_usd: float
+    raw: dict = field(default_factory=dict, repr=False)
 
     @property
     def uid(self) -> str:
         return f"{self.market_id}:{self.outcome_index}"
+
+
+def _pick_float(d: dict, *keys: str) -> float:
+    """Return the first non-zero float found among *keys* in dict *d*."""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            try:
+                f = float(v)
+                if f != 0.0:
+                    return f
+            except (ValueError, TypeError):
+                continue
+    return 0.0
 
 
 class PredictAPI:
@@ -100,11 +119,21 @@ class PredictAPI:
             resp.raise_for_status()
             body = resp.json()
 
-            for p in body.get("data", []):
+            items = body.get("data", [])
+            if items:
+                logger.info("Positions API sample item keys: %s", list(items[0].keys()))
+                logger.debug("Positions API sample item: %s", items[0])
+
+            for p in items:
                 market = p.get("market", {})
                 outcome = p.get("outcome", {})
-                size = float(p.get("size", 0))
-                avg_price = float(p.get("avgPrice", 0))
+
+                size = _pick_float(p, "size", "shares", "amount", "quantity", "balance")
+                avg_price = _pick_float(p, "avgPrice", "averagePrice", "price", "entryPrice")
+                value_usd = _pick_float(p, "valueUsd", "value", "totalValue", "cost")
+
+                if value_usd == 0.0 and size > 0 and avg_price > 0:
+                    value_usd = size * avg_price
 
                 positions.append(
                     Position(
@@ -115,12 +144,13 @@ class PredictAPI:
                         outcome_index=outcome.get("indexSet", 0),
                         size=size,
                         avg_price=avg_price,
-                        value_usd=size * avg_price,
+                        value_usd=value_usd,
+                        raw=p,
                     )
                 )
 
             cursor = body.get("cursor")
-            if not cursor or not body.get("data"):
+            if not cursor or not items:
                 break
 
         return positions
