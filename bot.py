@@ -58,37 +58,37 @@ def parse_slug(url: str) -> str | None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Predict.fun Order Book Tracker\n\n"
-        "Usage:\n"
-        "/look <predict.fun market URL> — show outcomes and subscribe to order book updates\n"
-        "/subs — list active subscriptions\n"
+        "Predict.fun — Трекер стакану\n\n"
+        "Команди:\n"
+        "/look <посилання на подію> — показати outcomes та підписатись на оновлення стакану\n"
+        "/subs — список активних підписок\n"
     )
 
 
 async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Usage: /look <predict.fun market URL>")
+        await update.message.reply_text("Використання: /look <посилання на подію predict.fun>")
         return
 
     url = context.args[0]
     slug = parse_slug(url)
     if not slug:
         await update.message.reply_text(
-            "Invalid URL. Expected format: https://predict.fun/market/<slug>"
+            "Невірне посилання. Очікуваний формат: https://predict.fun/market/<slug>"
         )
         return
 
-    await update.message.reply_text(f"Loading event: {slug} ...")
+    await update.message.reply_text(f"Завантажую подію: {slug} ...")
 
     try:
         title, outcomes = await api.get_outcomes_from_slug(slug)
     except Exception as e:
         logger.error("Failed to fetch category %s: %s", slug, e)
-        await update.message.reply_text(f"Error fetching event: {e}")
+        await update.message.reply_text(f"Помилка завантаження події: {e}")
         return
 
     if not outcomes:
-        await update.message.reply_text("No outcomes found for this event.")
+        await update.message.reply_text("Не знайдено outcomes для цієї події.")
         return
 
     pending_selections[update.effective_chat.id] = (slug, title, outcomes)
@@ -100,7 +100,7 @@ async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
     await update.message.reply_text(
-        f"*{title}*\n\nAvailable outcomes:",
+        f"*{title}*\n\nДоступні outcomes:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
@@ -111,25 +111,25 @@ async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_subs = {k: v for k, v in subscriptions.items() if k[0] == chat_id}
 
     if not user_subs:
-        await update.message.reply_text("No active subscriptions.")
+        await update.message.reply_text("Немає активних підписок.")
         return
 
     lines = []
     buttons = []
     for i, ((_, market_id, outcome_name), sub) in enumerate(user_subs.items()):
         price_str = f"{sub.last_notified_price}" if sub.last_notified_price is not None else "—"
-        lines.append(f"{i + 1}. {sub.category_title} → {outcome_name} (top bid: {price_str})")
+        lines.append(f"{i + 1}. {sub.category_title} → {outcome_name} (найкраща ставка: {price_str})")
         buttons.append(
             [
                 InlineKeyboardButton(
-                    f"Unsubscribe: {outcome_name}",
+                    f"Відписатись: {outcome_name}",
                     callback_data=f"unsub:{market_id}:{outcome_name}",
                 )
             ]
         )
 
     await update.message.reply_text(
-        "Active subscriptions:\n\n" + "\n".join(lines),
+        "Активні підписки:\n\n" + "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -151,12 +151,12 @@ async def _handle_select_outcome(query) -> None:
 
     sel = pending_selections.pop(chat_id, None)
     if not sel:
-        await query.edit_message_text("Session expired. Please run /look again.")
+        await query.edit_message_text("Сесія закінчилась. Виконайте /look ще раз.")
         return
 
     slug, title, outcomes = sel
     if idx >= len(outcomes):
-        await query.edit_message_text("Invalid selection.")
+        await query.edit_message_text("Невірний вибір.")
         return
 
     outcome = outcomes[idx]
@@ -164,7 +164,7 @@ async def _handle_select_outcome(query) -> None:
 
     if key in subscriptions:
         await query.edit_message_text(
-            f"Already subscribed to {outcome.name} for this event."
+            f"Ви вже підписані на {outcome.name} для цієї події."
         )
         return
 
@@ -173,7 +173,7 @@ async def _handle_select_outcome(query) -> None:
         ob = await api.get_orderbook(outcome.market_id)
     except Exception as e:
         logger.error("Failed to fetch orderbook for market %s: %s", outcome.market_id, e)
-        await query.edit_message_text(f"Error fetching order book: {e}")
+        await query.edit_message_text(f"Помилка завантаження стакану: {e}")
         return
 
     initial_price = ob.top_bid_price
@@ -189,17 +189,17 @@ async def _handle_select_outcome(query) -> None:
     )
     subscriptions[key] = sub
 
-    price_str = f"{initial_price}" if initial_price is not None else "no bids"
+    price_str = f"{initial_price}" if initial_price is not None else "немає ставок"
     unsub_button = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Unsubscribe", callback_data=f"unsub:{outcome.market_id}:{outcome.name}")]]
+        [[InlineKeyboardButton("Відписатись", callback_data=f"unsub:{outcome.market_id}:{outcome.name}")]]
     )
 
     await query.edit_message_text(
-        f"Subscribed to order book updates\n\n"
-        f"Event: *{title}*\n"
+        f"Підписка на оновлення стакану оформлена\n\n"
+        f"Подія: *{title}*\n"
         f"Outcome: *{outcome.name}*\n"
-        f"Initial top bid price: *{price_str}*\n\n"
-        f"You will receive notifications when the price changes.",
+        f"Початкова найкраща ставка: *{price_str}*\n\n"
+        f"Ви отримаєте сповіщення при зміні ціни.",
         reply_markup=unsub_button,
         parse_mode="Markdown",
     )
@@ -216,10 +216,10 @@ async def _handle_unsub(query) -> None:
 
     if sub:
         await query.edit_message_text(
-            f"Unsubscribed from {sub.category_title} → {outcome_name}."
+            f"Відписано від {sub.category_title} → {outcome_name}."
         )
     else:
-        await query.edit_message_text("Subscription not found (already removed).")
+        await query.edit_message_text("Підписку не знайдено (вже видалена).")
 
 
 async def poll_orderbooks(app: Application) -> None:
@@ -257,7 +257,7 @@ async def poll_orderbooks(app: Application) -> None:
                     direction = "+" if diff > 0 else ""
                     change_str = f"({direction}{diff:.4f})"
                 else:
-                    change_str = "(first reading)"
+                    change_str = "(перше значення)"
 
                 initial_str = f"{sub.initial_price}" if sub.initial_price is not None else "—"
 
@@ -265,7 +265,7 @@ async def poll_orderbooks(app: Application) -> None:
                     [
                         [
                             InlineKeyboardButton(
-                                "Unsubscribe",
+                                "Відписатись",
                                 callback_data=f"unsub:{sub.outcome.market_id}:{sub.outcome.name}",
                             )
                         ]
@@ -276,10 +276,10 @@ async def poll_orderbooks(app: Application) -> None:
                     await app.bot.send_message(
                         chat_id=sub.chat_id,
                         text=(
-                            f"Price update for *{sub.category_title}*\n"
+                            f"Оновлення ціни — *{sub.category_title}*\n"
                             f"Outcome: *{sub.outcome.name}*\n\n"
-                            f"Top bid: *{current_price}* {change_str}\n"
-                            f"Initial: {initial_str}"
+                            f"Найкраща ставка: *{current_price}* {change_str}\n"
+                            f"Початкова: {initial_str}"
                         ),
                         reply_markup=unsub_button,
                         parse_mode="Markdown",
