@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from predict_api import OrderBook, Outcome, PredictAPI
+from predict_api import OrderBook, Outcome, Position, PredictAPI
 
 load_dotenv()
 
@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 PREDICT_API_KEY = os.environ["PREDICT_API_KEY"]
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
+WALLET_POLL_INTERVAL = int(os.getenv("WALLET_POLL_INTERVAL", "30"))
 
 # Regex to extract slug from predict.fun URL
 SLUG_RE = re.compile(r"predict\.fun/market/([A-Za-z0-9_-]+)")
@@ -42,8 +43,18 @@ class Subscription:
     last_notified_price: float | None = None
 
 
+@dataclass
+class WalletWatch:
+    chat_id: int
+    address: str
+    known_position_uids: set[str] = field(default_factory=set)
+
+
 # Active subscriptions: key = (chat_id, market_id, outcome_name)
 subscriptions: dict[tuple[int, int, str], Subscription] = {}
+
+# Wallet watches: key = (chat_id, address)
+wallet_watches: dict[tuple[int, str], WalletWatch] = {}
 
 # Pending outcome selections: key = chat_id, value = (slug, title, outcomes)
 pending_selections: dict[int, tuple[str, str, list[Outcome]]] = {}
@@ -58,10 +69,12 @@ def parse_slug(url: str) -> str | None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Predict.fun — Трекер стакану\n\n"
+        "Predict.fun — Трекер стакану та позицій\n\n"
         "Команди:\n"
-        "/look <посилання на подію> — показати outcomes та підписатись на оновлення стакану\n"
-        "/subs — список активних підписок\n"
+        "/look <посилання на подію> — підписатись на оновлення стакану\n"
+        "/subs — список активних підписок на стакан\n\n"
+        "/watch <адреса гаманця> — стежити за позиціями гаманця\n"
+        "/wallets — список гаманців під стеженням\n"
     )
 
 
@@ -134,6 +147,84 @@ async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Використання: /watch <адреса гаманця>")
+        return
+
+    address = context.args[0].strip()
+    chat_id = update.effective_chat.id
+    key = (chat_id, address)
+
+    if key in wallet_watches:
+        await update.message.reply_text(f"Ви вже стежите за цим гаманцем.")
+        return
+
+    await update.message.reply_text(f"Завантажую поточні позиції: `{address}` ...", parse_mode="Markdown")
+
+    try:
+        positions = await api.get_positions_by_address(address)
+    except Exception as e:
+        logger.error("Failed to fetch positions for %s: %s", address, e)
+        await update.message.reply_text(f"Помилка завантаження позицій: {e}")
+        return
+
+    known_uids = {p.uid for p in positions}
+    wallet_watches[key] = WalletWatch(
+        chat_id=chat_id,
+        address=address,
+        known_position_uids=known_uids,
+    )
+
+    short_addr = f"{address[:6]}...{address[-4:]}"
+    unwatch_btn = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Припинити стеження", callback_data=f"unwatch:{address}")]]
+    )
+
+    if positions:
+        lines = []
+        for p in positions:
+            lines.append(
+                f"  • {p.market_title} → {p.outcome_name}\n"
+                f"    Шейрсів: {p.size:.2f} | Ціна: {p.avg_price:.4f} | ${p.value_usd:.2f}"
+            )
+        pos_text = "\n".join(lines)
+    else:
+        pos_text = "  Позицій поки немає."
+
+    await update.message.reply_text(
+        f"Стеження за гаманцем `{short_addr}` увімкнено\n\n"
+        f"Поточні позиції ({len(positions)}):\n{pos_text}\n\n"
+        f"Ви отримаєте сповіщення при появі нових позицій.",
+        reply_markup=unwatch_btn,
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    user_watches = {k: v for k, v in wallet_watches.items() if k[0] == chat_id}
+
+    if not user_watches:
+        await update.message.reply_text("Немає гаманців під стеженням.")
+        return
+
+    lines = []
+    buttons = []
+    for i, ((_, addr), w) in enumerate(user_watches.items()):
+        short = f"{addr[:6]}...{addr[-4:]}"
+        lines.append(f"{i + 1}. `{short}` — {len(w.known_position_uids)} позицій")
+        buttons.append(
+            [InlineKeyboardButton(f"Припинити: {short}", callback_data=f"unwatch:{addr}")]
+        )
+
+    await update.message.reply_text(
+        "Гаманці під стеженням:\n\n" + "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -143,6 +234,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_select_outcome(query)
     elif data.startswith("unsub:"):
         await _handle_unsub(query)
+    elif data.startswith("unwatch:"):
+        await _handle_unwatch(query)
 
 
 async def _handle_select_outcome(query) -> None:
@@ -222,6 +315,20 @@ async def _handle_unsub(query) -> None:
         await query.edit_message_text("Підписку не знайдено (вже видалена).")
 
 
+async def _handle_unwatch(query) -> None:
+    chat_id = query.message.chat_id
+    address = query.data.split(":", 1)[1]
+
+    key = (chat_id, address)
+    w = wallet_watches.pop(key, None)
+
+    short = f"{address[:6]}...{address[-4:]}"
+    if w:
+        await query.edit_message_text(f"Стеження за гаманцем {short} припинено.")
+    else:
+        await query.edit_message_text(f"Гаманець {short} не знайдено (вже видалено).")
+
+
 async def poll_orderbooks(app: Application) -> None:
     """Background task that polls orderbooks for all active subscriptions."""
     while True:
@@ -288,10 +395,64 @@ async def poll_orderbooks(app: Application) -> None:
                     logger.error("Failed to send notification to chat %s: %s", sub.chat_id, e)
 
 
+async def poll_wallets(app: Application) -> None:
+    """Background task that polls positions for all watched wallets."""
+    while True:
+        await asyncio.sleep(WALLET_POLL_INTERVAL)
+
+        if not wallet_watches:
+            continue
+
+        keys = list(wallet_watches.keys())
+        for key in keys:
+            w = wallet_watches.get(key)
+            if w is None:
+                continue
+
+            try:
+                positions = await api.get_positions_by_address(w.address)
+            except Exception as e:
+                logger.warning("Wallet poll failed for %s: %s", w.address, e)
+                continue
+
+            current_uids = {p.uid for p in positions}
+            new_uids = current_uids - w.known_position_uids
+
+            if not new_uids:
+                continue
+
+            w.known_position_uids = current_uids
+            new_positions = [p for p in positions if p.uid in new_uids]
+
+            short_addr = f"{w.address[:6]}...{w.address[-4:]}"
+            unwatch_btn = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Припинити стеження", callback_data=f"unwatch:{w.address}")]]
+            )
+
+            for p in new_positions:
+                try:
+                    await app.bot.send_message(
+                        chat_id=w.chat_id,
+                        text=(
+                            f"Нова позиція — гаманець `{short_addr}`\n\n"
+                            f"Подія: *{p.market_title}*\n"
+                            f"Outcome: *{p.outcome_name}*\n"
+                            f"Шейрсів: *{p.size:.2f}*\n"
+                            f"Ціна: *{p.avg_price:.4f}*\n"
+                            f"Вартість: *${p.value_usd:.2f}*"
+                        ),
+                        reply_markup=unwatch_btn,
+                        parse_mode="Markdown",
+                    )
+                except Exception as e:
+                    logger.error("Failed to send wallet notification to chat %s: %s", w.chat_id, e)
+
+
 async def post_init(app: Application) -> None:
     global api
     api = PredictAPI(PREDICT_API_KEY)
     asyncio.create_task(poll_orderbooks(app))
+    asyncio.create_task(poll_wallets(app))
 
 
 async def post_shutdown(app: Application) -> None:
@@ -311,6 +472,8 @@ def main() -> None:
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("look", cmd_look))
     app.add_handler(CommandHandler("subs", cmd_subs))
+    app.add_handler(CommandHandler("watch", cmd_watch))
+    app.add_handler(CommandHandler("wallets", cmd_wallets))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
     logger.info("Bot started. Polling interval: %ds", POLL_INTERVAL)

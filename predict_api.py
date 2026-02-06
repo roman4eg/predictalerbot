@@ -1,5 +1,5 @@
 import httpx
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 API_BASE = "https://api.predict.fun"
@@ -31,6 +31,22 @@ class OrderBook:
         if self.asks:
             return self.asks[0][0]
         return None
+
+
+@dataclass
+class Position:
+    market_id: int
+    market_title: str
+    category_slug: str
+    outcome_name: str
+    outcome_index: int
+    size: float
+    avg_price: float
+    value_usd: float
+
+    @property
+    def uid(self) -> str:
+        return f"{self.market_id}:{self.outcome_index}"
 
 
 class PredictAPI:
@@ -70,6 +86,44 @@ class PredictAPI:
             asks=data.get("asks", []),
             update_timestamp_ms=data.get("updateTimestampMs", 0),
         )
+
+    async def get_positions_by_address(self, address: str) -> list[Position]:
+        positions: list[Position] = []
+        cursor: str | None = None
+
+        while True:
+            params: dict = {"first": 50}
+            if cursor:
+                params["after"] = cursor
+
+            resp = await self.client.get(f"/v1/positions/{address}", params=params)
+            resp.raise_for_status()
+            body = resp.json()
+
+            for p in body.get("data", []):
+                market = p.get("market", {})
+                outcome = p.get("outcome", {})
+                size = float(p.get("size", 0))
+                avg_price = float(p.get("avgPrice", 0))
+
+                positions.append(
+                    Position(
+                        market_id=market.get("id", 0),
+                        market_title=market.get("title", ""),
+                        category_slug=market.get("categorySlug", ""),
+                        outcome_name=outcome.get("name", ""),
+                        outcome_index=outcome.get("indexSet", 0),
+                        size=size,
+                        avg_price=avg_price,
+                        value_usd=size * avg_price,
+                    )
+                )
+
+            cursor = body.get("cursor")
+            if not cursor or not body.get("data"):
+                break
+
+        return positions
 
     async def get_outcomes_from_slug(self, slug: str) -> tuple[str, list[Outcome]]:
         """Fetch category by slug and extract outcomes (markets within the category).
