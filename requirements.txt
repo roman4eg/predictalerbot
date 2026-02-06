@@ -1,3 +1,6 @@
 python-telegram-bot==21.10
 httpx==0.28.1
 python-dotenv==1.0.1
+fastapi==0.115.0
+uvicorn[standard]==0.34.0
+predict-sdk>=0.1.0
