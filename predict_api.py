@@ -68,6 +68,9 @@ def _pick_float(d: dict, *keys: str) -> float:
     return 0.0
 
 
+AMOUNT_DECIMALS = 18  # on-chain ERC1155 conditional tokens use 18 decimals
+
+
 class PredictAPI:
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -121,19 +124,25 @@ class PredictAPI:
 
             items = body.get("data", [])
             if items:
-                logger.info("Positions API sample item keys: %s", list(items[0].keys()))
+                logger.debug("Positions API sample item keys: %s", list(items[0].keys()))
                 logger.debug("Positions API sample item: %s", items[0])
 
             for p in items:
                 market = p.get("market", {})
                 outcome = p.get("outcome", {})
 
-                size = _pick_float(p, "size", "shares", "amount", "quantity", "balance")
-                avg_price = _pick_float(p, "avgPrice", "averagePrice", "price", "entryPrice")
-                value_usd = _pick_float(p, "valueUsd", "value", "totalValue", "cost")
+                # amount is raw on-chain value with 18 decimals
+                raw_amount = _pick_float(p, "amount", "size", "shares", "quantity", "balance")
+                shares = raw_amount / (10 ** AMOUNT_DECIMALS) if raw_amount > 1e12 else raw_amount
 
-                if value_usd == 0.0 and size > 0 and avg_price > 0:
-                    value_usd = size * avg_price
+                value_usd = _pick_float(p, "valueUsd", "value", "totalValue", "cost")
+                avg_price = _pick_float(p, "avgPrice", "averagePrice", "price", "entryPrice")
+
+                # API doesn't return price directly — derive from value/shares
+                if avg_price == 0.0 and shares > 0 and value_usd > 0:
+                    avg_price = value_usd / shares
+                if value_usd == 0.0 and shares > 0 and avg_price > 0:
+                    value_usd = shares * avg_price
 
                 positions.append(
                     Position(
@@ -142,7 +151,7 @@ class PredictAPI:
                         category_slug=market.get("categorySlug", ""),
                         outcome_name=outcome.get("name", ""),
                         outcome_index=outcome.get("indexSet", 0),
-                        size=size,
+                        size=shares,
                         avg_price=avg_price,
                         value_usd=value_usd,
                         raw=p,
