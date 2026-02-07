@@ -96,6 +96,10 @@ engine = None  # FarmingEngine | None — initialized in post_init if PRIVATE_KE
 pending_farm: dict[int, dict] = {}
 # Pending shares input: chat_id -> config dict
 pending_farm_shares: dict[int, dict] = {}
+# Pending depth input: chat_id -> config dict (after shares chosen)
+pending_farm_depth: dict[int, dict] = {}
+# Pending stop_at input: chat_id -> config dict (after depth chosen)
+pending_farm_stop: dict[int, dict] = {}
 
 
 def parse_slug(url: str) -> str | None:
@@ -455,13 +459,51 @@ async def _handle_farm_outcome(query) -> None:
     )
 
 
-async def _create_farm_session(chat_id: int, config: dict, shares_wei: int) -> str:
+def _show_depth_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Build message + buttons for depth selection step."""
+    top_bid = config["top_bid_cents"]
+    text = (
+        f"*{config['title']}* → *{config['outcome'].name}*\n"
+        f"Топ бід: *{top_bid}ц*\n\n"
+        f"Оберіть глибину (центів від топ біду):"
+    )
+    buttons = [
+        [
+            InlineKeyboardButton("1ц", callback_data="farm_depth:1"),
+            InlineKeyboardButton("2ц", callback_data="farm_depth:2"),
+            InlineKeyboardButton("3ц", callback_data="farm_depth:3"),
+            InlineKeyboardButton("5ц", callback_data="farm_depth:5"),
+        ],
+        [InlineKeyboardButton("Ввести вручну", callback_data="farm_depth:manual")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
+def _show_stop_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Build message + buttons for stop-at selection step."""
+    text = (
+        f"*{config['title']}* → *{config['outcome'].name}*\n"
+        f"Шейрсів: *{config['shares_str']}* | Глибина: *{config['depth_cents']}ц*\n\n"
+        f"Встановити час зупинки (UTC)?\n"
+        f"Формат: `YYYY-MM-DD HH:MM`"
+    )
+    buttons = [
+        [InlineKeyboardButton("Без обмеження часу", callback_data="farm_nostop")],
+        [InlineKeyboardButton("Ввести час зупинки", callback_data="farm_setstop")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def _create_farm_session(chat_id: int, config: dict) -> str:
     """Create a FarmingSession from the config dict. Returns message text."""
     from predict_bot import FarmingSession, WEI
 
     outcome = config["outcome"]
     cat_data = config["cat_data"]
     market = config["market"]
+    shares_wei = config.get("shares_wei", 0)
+    depth_cents = config.get("depth_cents", 1)
+    stop_at = config.get("stop_at")
 
     session = FarmingSession(
         session_id=str(uuid.uuid4())[:8],
@@ -472,8 +514,8 @@ async def _create_farm_session(chat_id: int, config: dict, shares_wei: int) -> s
         side=0,  # BUY
         shares_wei=shares_wei,
         max_spread_cents=3,
-        depth_cents=1,
-        stop_at=None,
+        depth_cents=depth_cents,
+        stop_at=stop_at,
         is_neg_risk=cat_data.get("isNegRisk", False),
         is_yield_bearing=cat_data.get("isYieldBearing", False),
         fee_rate_bps=market.get("feeRateBps", 0),
@@ -481,30 +523,50 @@ async def _create_farm_session(chat_id: int, config: dict, shares_wei: int) -> s
 
     engine.add_session(session)
 
-    shares_str = "MAX (весь баланс)" if shares_wei == 0 else f"{shares_wei / WEI:.0f}"
+    shares_str = config.get("shares_str", str(shares_wei))
+    stop_str = stop_at.strftime("%Y-%m-%d %H:%M UTC") if stop_at else "без обмеження"
     return (
         f"Фармінг-сесію створено!\n\n"
         f"ID: `{session.session_id}`\n"
         f"Подія: *{config['title']}*\n"
         f"Outcome: *{outcome.name}*\n"
         f"Шейрсів: *{shares_str}*\n"
-        f"Глибина: *1ц* | Спред: *3ц*\n\n"
+        f"Глибина: *{depth_cents}ц* | Спред: *3ц*\n"
+        f"Зупинка: *{stop_str}*\n\n"
         f"Бот почне працювати протягом кількох секунд.\n"
         f"Перевірити: /sessions\n"
         f"Зупинити: /stop {session.session_id}"
     )
 
 
+async def _advance_to_depth(chat_id: int, config: dict, query) -> None:
+    """Move to depth selection step."""
+    pending_farm_depth[chat_id] = config
+    text, markup = _show_depth_buttons(config)
+    await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+
+
+async def _advance_to_stop(chat_id: int, config: dict, query=None, message=None) -> None:
+    """Move to stop-at selection step."""
+    pending_farm_stop[chat_id] = config
+    text, markup = _show_stop_buttons(config)
+    if query:
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+    elif message:
+        await message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+
+
 async def _handle_farm_max(query) -> None:
-    """User clicked MAX — create session with use_max."""
+    """User clicked MAX — proceed to depth step."""
     chat_id = query.message.chat_id
     config = pending_farm_shares.pop(chat_id, None)
     if not config:
         await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
-    text = await _create_farm_session(chat_id, config, shares_wei=0)
-    await query.edit_message_text(text, parse_mode="Markdown")
+    config["shares_wei"] = 0
+    config["shares_str"] = "MAX (весь баланс)"
+    await _advance_to_depth(chat_id, config, query)
 
 
 async def _handle_farm_manual(query) -> None:
@@ -517,6 +579,53 @@ async def _handle_farm_manual(query) -> None:
 
     await query.edit_message_text(
         f"Введіть кількість шейрсів (макс: {config['max_shares']}):",
+    )
+
+
+async def _handle_farm_depth(query) -> None:
+    """User selected depth value."""
+    chat_id = query.message.chat_id
+    val = query.data.split(":")[1]
+
+    config = pending_farm_depth.pop(chat_id, None)
+    if not config:
+        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    if val == "manual":
+        # Put back and wait for text input
+        pending_farm_depth[chat_id] = config
+        await query.edit_message_text("Введіть глибину (центів від топ біду), наприклад: 2")
+        return
+
+    config["depth_cents"] = int(val)
+    await _advance_to_stop(chat_id, config, query=query)
+
+
+async def _handle_farm_nostop(query) -> None:
+    """User chose no stop time."""
+    chat_id = query.message.chat_id
+    config = pending_farm_stop.pop(chat_id, None)
+    if not config:
+        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    config["stop_at"] = None
+    text = await _create_farm_session(chat_id, config)
+    await query.edit_message_text(text, parse_mode="Markdown")
+
+
+async def _handle_farm_setstop(query) -> None:
+    """User wants to enter stop time manually."""
+    chat_id = query.message.chat_id
+    config = pending_farm_stop.get(chat_id)
+    if not config:
+        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    await query.edit_message_text(
+        "Введіть час зупинки (UTC).\nФормат: `YYYY-MM-DD HH:MM`\nНаприклад: `2026-02-08 15:30`",
+        parse_mode="Markdown",
     )
 
 
@@ -535,26 +644,67 @@ async def _handle_farm_stop(query) -> None:
 
 
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle plain text messages — used for shares input during /farm flow."""
+    """Handle plain text messages — used for input during /farm flow steps."""
     chat_id = update.effective_chat.id
-    config = pending_farm_shares.get(chat_id)
-    if not config:
-        return  # Not in farming flow, ignore
-
     text = update.message.text.strip()
-    try:
-        shares = int(text)
-        if shares <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text("Введіть ціле число більше 0.")
+
+    # Step: shares input
+    if chat_id in pending_farm_shares:
+        config = pending_farm_shares.get(chat_id)
+        try:
+            shares = int(text)
+            if shares <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Введіть ціле число більше 0.")
+            return
+
+        from predict_bot import WEI
+        pending_farm_shares.pop(chat_id, None)
+        config["shares_wei"] = shares * WEI
+        config["shares_str"] = str(shares)
+        # Advance to depth step
+        pending_farm_depth[chat_id] = config
+        msg_text, markup = _show_depth_buttons(config)
+        await update.message.reply_text(msg_text, reply_markup=markup, parse_mode="Markdown")
         return
 
-    from predict_bot import WEI
-    pending_farm_shares.pop(chat_id, None)
-    shares_wei = shares * WEI
-    msg = await _create_farm_session(chat_id, config, shares_wei=shares_wei)
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    # Step: depth input (manual)
+    if chat_id in pending_farm_depth:
+        config = pending_farm_depth.get(chat_id)
+        try:
+            depth = int(text)
+            if depth <= 0 or depth > 50:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Введіть число від 1 до 50.")
+            return
+
+        pending_farm_depth.pop(chat_id, None)
+        config["depth_cents"] = depth
+        await _advance_to_stop(chat_id, config, message=update.message)
+        return
+
+    # Step: stop_at input
+    if chat_id in pending_farm_stop:
+        config = pending_farm_stop.get(chat_id)
+        try:
+            stop_at = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            if stop_at <= datetime.now(timezone.utc):
+                await update.message.reply_text("Час має бути у майбутньому. Спробуйте ще раз.")
+                return
+        except ValueError:
+            await update.message.reply_text(
+                "Невірний формат. Введіть у форматі: `YYYY-MM-DD HH:MM`",
+                parse_mode="Markdown",
+            )
+            return
+
+        pending_farm_stop.pop(chat_id, None)
+        config["stop_at"] = stop_at
+        msg = await _create_farm_session(chat_id, config)
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -574,6 +724,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_farm_max(query)
     elif data == "farm_manual":
         await _handle_farm_manual(query)
+    elif data.startswith("farm_depth:"):
+        await _handle_farm_depth(query)
+    elif data == "farm_nostop":
+        await _handle_farm_nostop(query)
+    elif data == "farm_setstop":
+        await _handle_farm_setstop(query)
     elif data.startswith("farm_stop:"):
         await _handle_farm_stop(query)
 
