@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Predict.fun — Farming Bot</title>
+<style>
+  :root {
+    --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+    --accent: #6c5ce7; --green: #00b894; --red: #d63031;
+    --text: #dfe6e9; --muted: #636e72;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text);
+    padding: 20px; max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 1.4em; margin-bottom: 20px; color: var(--accent); }
+  h2 { font-size: 1.1em; margin-bottom: 12px; color: var(--muted); }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 0.85em; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  input, select {
+    width: 100%; padding: 8px 12px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font-size: 0.95em;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+  button {
+    padding: 10px 18px; border: none; border-radius: 6px;
+    cursor: pointer; font-size: 0.9em; font-weight: 600;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { opacity: 0.85; }
+  .btn-danger { background: var(--red); color: #fff; font-size: 0.8em; padding: 6px 12px; }
+  .btn-danger:hover { opacity: 0.85; }
+  .btn-secondary { background: var(--border); color: var(--text); }
+  #outcome-selector { margin-top: 10px; }
+  .outcomes-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+  .outcome-btn {
+    padding: 8px 16px; border: 2px solid var(--border);
+    border-radius: 6px; background: transparent; color: var(--text); cursor: pointer;
+  }
+  .outcome-btn.selected { border-color: var(--accent); background: rgba(108,92,231,0.15); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+  th { text-align: left; padding: 8px 6px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; }
+  td { padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  .price { font-family: monospace; }
+  .error-text { color: var(--red); font-size: 0.8em; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75em; font-weight: 600; }
+  .badge-green { background: rgba(0,184,148,0.2); color: var(--green); }
+  .badge-red { background: rgba(214,48,49,0.2); color: var(--red); }
+  .badge-grey { background: rgba(99,110,114,0.2); color: var(--muted); }
+  #market-info { margin-top: 10px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Predict.fun — Farming Bot</h1>
+
+<div class="card">
+  <h2>Nova sesiia</h2>
+  <label>Posylannia na podiiu</label>
+  <div class="row">
+    <input type="text" id="market-url" placeholder="https://predict.fun/market/...">
+    <button class="btn-secondary" id="btn-load" style="flex:0 0 auto; width:140px;">Zavantazhyty</button>
+  </div>
+  <div id="market-info"></div>
+  <div id="outcome-selector" style="display:none;">
+    <label>Outcome</label>
+    <div class="outcomes-row" id="outcomes-row"></div>
+  </div>
+
+  <div class="row" style="margin-top:10px;">
+    <div>
+      <label>Side</label>
+      <select id="side">
+        <option value="0">BUY</option>
+        <option value="1">SELL</option>
+      </select>
+    </div>
+    <div>
+      <label>Shares</label>
+      <input type="number" id="shares" value="200" min="1">
+    </div>
+    <div>
+      <label>Max spread (cents)</label>
+      <input type="number" id="max-spread" value="3" min="1" max="50">
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>Match start (UTC)</label>
+      <input type="datetime-local" id="cutoff-utc">
+    </div>
+    <div>
+      <label>Stop N min before</label>
+      <input type="number" id="cutoff-minutes" value="30" min="0">
+    </div>
+  </div>
+
+  <div style="margin-top:16px;">
+    <button class="btn-primary" id="btn-start">Start farming</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Active sessions</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Event / Outcome</th>
+        <th>Side</th>
+        <th>Order (c)</th>
+        <th>Bid / Ask</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="sessions-body">
+      <tr><td colspan="7" style="text-align:center;color:var(--muted);">No active sessions</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+var selectedOutcome = null;
+var marketData = null;
+
+document.getElementById("btn-load").addEventListener("click", resolveMarket);
+document.getElementById("btn-start").addEventListener("click", createSession);
+
+async function resolveMarket() {
+  var url = document.getElementById("market-url").value.trim();
+  if (!url) return;
+  var info = document.getElementById("market-info");
+  info.textContent = "Loading...";
+  try {
+    var resp = await fetch("/api/resolve-market?url=" + encodeURIComponent(url));
+    var data = await resp.json();
+    if (data.error) { info.textContent = "Error: " + data.error; return; }
+    marketData = data;
+    info.textContent = data.title;
+    var row = document.getElementById("outcomes-row");
+    row.innerHTML = "";
+    selectedOutcome = null;
+    data.outcomes.forEach(function(o, i) {
+      var btn = document.createElement("button");
+      btn.className = "outcome-btn";
+      btn.textContent = o.name;
+      btn.addEventListener("click", function() { selectOutcome(i); });
+      row.appendChild(btn);
+    });
+    document.getElementById("outcome-selector").style.display = "block";
+  } catch(e) { info.textContent = "Error: " + e.message; }
+}
+
+function selectOutcome(idx) {
+  selectedOutcome = marketData.outcomes[idx];
+  var buttons = document.querySelectorAll(".outcome-btn");
+  for (var i = 0; i < buttons.length; i++) {
+    if (i === idx) { buttons[i].classList.add("selected"); }
+    else { buttons[i].classList.remove("selected"); }
+  }
+}
+
+async function createSession() {
+  if (!selectedOutcome) { alert("Select an outcome first"); return; }
+  var cutoffInput = document.getElementById("cutoff-utc").value;
+  var payload = {
+    market_id: selectedOutcome.market_id,
+    market_title: marketData.title,
+    token_id: selectedOutcome.on_chain_id,
+    outcome_name: selectedOutcome.name,
+    side: parseInt(document.getElementById("side").value),
+    shares: parseFloat(document.getElementById("shares").value),
+    max_spread_cents: parseInt(document.getElementById("max-spread").value),
+    cutoff_utc: cutoffInput ? cutoffInput + ":00" : null,
+    cutoff_minutes_before: parseInt(document.getElementById("cutoff-minutes").value),
+    is_neg_risk: selectedOutcome.is_neg_risk,
+    is_yield_bearing: selectedOutcome.is_yield_bearing,
+    fee_rate_bps: selectedOutcome.fee_rate_bps
+  };
+  try {
+    var resp = await fetch("/api/sessions", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload)
+    });
+    var data = await resp.json();
+    if (data.error) { alert("Error: " + data.error); return; }
+    refreshSessions();
+  } catch(e) { alert("Error: " + e.message); }
+}
+
+async function stopSession(id) {
+  if (!confirm("Stop session " + id + "?")) return;
+  await fetch("/api/sessions/" + id, { method: "DELETE" });
+  refreshSessions();
+}
+
+async function refreshSessions() {
+  try {
+    var resp = await fetch("/api/sessions");
+    var data = await resp.json();
+    var tbody = document.getElementById("sessions-body");
+    if (!data.sessions || !data.sessions.length) {
+      tbody.innerHTML = "<tr><td colspan=\"7\" style=\"text-align:center;color:var(--muted);\">No active sessions</td></tr>";
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < data.sessions.length; i++) {
+      var s = data.sessions[i];
+      var statusText = "Stopped";
+      var badge = "badge-grey";
+      if (s.active && !s.is_expired) { statusText = "Active"; badge = "badge-green"; }
+      else if (s.is_expired) { statusText = "Deadline"; badge = "badge-red"; }
+      var errHtml = s.error ? "<br><span class=\"error-text\">" + s.error + "</span>" : "";
+      var orderPrice = s.current_order_price_cents !== null ? s.current_order_price_cents + "c" : "\u2014";
+      var bidAsk = (s.last_top_bid !== null ? s.last_top_bid : "\u2014") + " / " + (s.last_top_ask !== null ? s.last_top_ask : "\u2014");
+      var stopBtn = s.active ? "<button class=\"btn-danger\" data-stop=\"" + s.session_id + "\">Stop</button>" : "";
+      html += "<tr>";
+      html += "<td>" + s.session_id + "</td>";
+      html += "<td>" + s.market_title + "<br><strong>" + s.outcome_name + "</strong></td>";
+      html += "<td>" + s.side + "</td>";
+      html += "<td class=\"price\">" + orderPrice + "</td>";
+      html += "<td class=\"price\">" + bidAsk + "</td>";
+      html += "<td><span class=\"badge " + badge + "\">" + statusText + "</span>" + errHtml + "</td>";
+      html += "<td>" + stopBtn + "</td>";
+      html += "</tr>";
+    }
+    tbody.innerHTML = html;
+    var stopBtns = tbody.querySelectorAll("[data-stop]");
+    for (var j = 0; j < stopBtns.length; j++) {
+      stopBtns[j].addEventListener("click", function() {
+        stopSession(this.getAttribute("data-stop"));
+      });
+    }
+  } catch(e) { console.error(e); }
+}
+
+setInterval(refreshSessions, 3000);
+refreshSessions();
+</script>
+
+</body>
+</html>
