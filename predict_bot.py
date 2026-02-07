@@ -50,6 +50,7 @@ class FarmingSession:
     is_neg_risk: bool
     is_yield_bearing: bool
     fee_rate_bps: int
+    invert_book: bool = False  # invert orderbook for secondary outcome in binary markets
 
     # Runtime state
     active: bool = True
@@ -201,8 +202,8 @@ class FarmingEngine:
             s.active = False
             return
 
-        # Fetch orderbook
-        ob = await self.api.get_orderbook(s.market_id)
+        # Fetch orderbook (invert for secondary outcome in binary markets)
+        ob = await self.api.get_orderbook(s.market_id, invert=s.invert_book)
 
         top_bid_price = ob.top_bid_price
         top_ask_price = ob.top_ask_price

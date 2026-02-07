@@ -102,6 +102,7 @@ async def resolve_market(url: str):
             "is_neg_risk": cat_data.get("isNegRisk", False),
             "is_yield_bearing": cat_data.get("isYieldBearing", False),
             "fee_rate_bps": market.get("feeRateBps", 0),
+            "invert_book": o.invert_book,
         })
 
     return {
@@ -122,10 +123,10 @@ async def get_balance():
 
 
 @app.get("/api/orderbook")
-async def get_orderbook(market_id: int):
+async def get_orderbook(market_id: int, invert: bool = False):
     """Get current orderbook top bid/ask for a market."""
     try:
-        ob = await api.get_orderbook(market_id)
+        ob = await api.get_orderbook(market_id, invert=invert)
         return {
             "market_id": ob.market_id,
             "top_bid": ob.top_bid_price,
@@ -162,6 +163,7 @@ async def create_session(request: Request):
         is_neg_risk=body.get("is_neg_risk", False),
         is_yield_bearing=body.get("is_yield_bearing", False),
         fee_rate_bps=int(body.get("fee_rate_bps", 0)),
+        invert_book=body.get("invert_book", False),
     )
 
     engine.add_session(session)

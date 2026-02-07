@@ -174,9 +174,9 @@ async function fetchBalance() {
   } catch(e) { console.error("balance fetch error:", e); }
 }
 
-async function fetchOrderbook(marketId) {
+async function fetchOrderbook(marketId, invert) {
   try {
-    var resp = await fetch("/api/orderbook?market_id=" + marketId);
+    var resp = await fetch("/api/orderbook?market_id=" + marketId + "&invert=" + (invert ? "true" : "false"));
     var data = await resp.json();
     if (data.error) return;
     currentTopBid = data.top_bid;
@@ -273,7 +273,7 @@ function selectOutcome(idx) {
     if (i === idx) { buttons[i].classList.add("selected"); }
     else { buttons[i].classList.remove("selected"); }
   }
-  fetchOrderbook(selectedOutcome.market_id);
+  fetchOrderbook(selectedOutcome.market_id, selectedOutcome.invert_book);
 }
 
 async function createSession() {
@@ -294,7 +294,8 @@ async function createSession() {
     stop_at: stopAtInput ? stopAtInput + ":00" : null,
     is_neg_risk: selectedOutcome.is_neg_risk,
     is_yield_bearing: selectedOutcome.is_yield_bearing,
-    fee_rate_bps: selectedOutcome.fee_rate_bps
+    fee_rate_bps: selectedOutcome.fee_rate_bps,
+    invert_book: selectedOutcome.invert_book || false
   };
   try {
     var resp = await fetch("/api/sessions", {

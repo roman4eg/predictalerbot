@@ -15,6 +15,7 @@ class Outcome:
     market_id: int
     index_set: int
     on_chain_id: str
+    invert_book: bool = False  # True for secondary outcome in single-market binary events
 
 
 @dataclass
@@ -101,14 +102,30 @@ class PredictAPI:
         resp.raise_for_status()
         return resp.json()
 
-    async def get_orderbook(self, market_id: int) -> OrderBook:
+    async def get_orderbook(self, market_id: int, invert: bool = False) -> OrderBook:
         resp = await self.client.get(f"/v1/markets/{market_id}/orderbook")
         resp.raise_for_status()
         data = resp.json()["data"]
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+
+        if invert:
+            # For the secondary outcome in a binary market:
+            # buying B at price P = selling A at price (1-P)
+            inv_bids = sorted(
+                [[round(1 - a[0], 4), a[1]] for a in asks],
+                key=lambda x: x[0], reverse=True,
+            )
+            inv_asks = sorted(
+                [[round(1 - b[0], 4), b[1]] for b in bids],
+                key=lambda x: x[0],
+            )
+            bids, asks = inv_bids, inv_asks
+
         return OrderBook(
             market_id=data["marketId"],
-            bids=data.get("bids", []),
-            asks=data.get("asks", []),
+            bids=bids,
+            asks=asks,
             update_timestamp_ms=data.get("updateTimestampMs", 0),
         )
 
@@ -210,13 +227,14 @@ class PredictAPI:
             market = markets[0]
             market_outcomes = market.get("outcomes", [])
             if market_outcomes:
-                for o in market_outcomes:
+                for i, o in enumerate(market_outcomes):
                     outcomes.append(
                         Outcome(
                             name=o["name"],
                             market_id=market["id"],
                             index_set=o.get("indexSet", 0),
                             on_chain_id=o.get("onChainId", ""),
+                            invert_book=i > 0,  # second+ outcome needs inverted orderbook
                         )
                     )
             else:

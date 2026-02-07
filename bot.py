@@ -408,9 +408,9 @@ async def _handle_farm_outcome(query) -> None:
     markets = farm_data["markets"]
     market = next((mk for mk in markets if mk["id"] == outcome.market_id), {})
 
-    # Fetch orderbook
+    # Fetch orderbook (invert for secondary outcome in binary markets)
     try:
-        ob = await api.get_orderbook(outcome.market_id)
+        ob = await api.get_orderbook(outcome.market_id, invert=outcome.invert_book)
     except Exception as e:
         await query.edit_message_text(f"Помилка завантаження стакану: {e}")
         return
@@ -519,6 +519,7 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
         is_neg_risk=cat_data.get("isNegRisk", False),
         is_yield_bearing=cat_data.get("isYieldBearing", False),
         fee_rate_bps=market.get("feeRateBps", 0),
+        invert_book=outcome.invert_book,
     )
 
     engine.add_session(session)
@@ -757,9 +758,9 @@ async def _handle_select_outcome(query) -> None:
         )
         return
 
-    # Fetch initial orderbook
+    # Fetch initial orderbook (invert for secondary outcome in binary markets)
     try:
-        ob = await api.get_orderbook(outcome.market_id)
+        ob = await api.get_orderbook(outcome.market_id, invert=outcome.invert_book)
     except Exception as e:
         logger.error("Failed to fetch orderbook for market %s: %s", outcome.market_id, e)
         await query.edit_message_text(f"Помилка завантаження стакану: {e}")
@@ -841,7 +842,7 @@ async def poll_orderbooks(app: Application) -> None:
                 continue
 
             try:
-                ob = await api.get_orderbook(sub.outcome.market_id)
+                ob = await api.get_orderbook(sub.outcome.market_id, invert=sub.outcome.invert_book)
             except Exception as e:
                 logger.warning("Orderbook poll failed for market %s: %s", sub.outcome.market_id, e)
                 continue
