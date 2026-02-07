@@ -164,10 +164,10 @@ class PredictAPI:
 
         return positions
 
-    async def get_outcomes_from_slug(self, slug: str) -> tuple[str, list[Outcome]]:
+    async def get_outcomes_from_slug(self, slug: str) -> tuple[str, list[Outcome], dict]:
         """Fetch category by slug and extract outcomes (markets within the category).
 
-        Returns (category_title, list_of_outcomes).
+        Returns (category_title, list_of_outcomes, raw_category_data).
 
         Predict.fun structure:
         - A category (event) contains multiple markets.
@@ -186,12 +186,21 @@ class PredictAPI:
             # Multi-market category (neg-risk): each market IS an outcome
             for m in markets:
                 name = m.get("title") or m.get("question", f"Market {m['id']}")
+                # For neg-risk markets, the token_id is the onChainId of the
+                # "Yes" outcome (indexSet=1) inside each market's outcomes[]
+                market_ocs = m.get("outcomes", [])
+                on_chain_id = ""
+                idx_set = 0
+                for o in market_ocs:
+                    if o.get("indexSet") == 1 or not on_chain_id:
+                        on_chain_id = o.get("onChainId", "")
+                        idx_set = o.get("indexSet", 0)
                 outcomes.append(
                     Outcome(
                         name=name,
                         market_id=m["id"],
-                        index_set=0,
-                        on_chain_id="",
+                        index_set=idx_set,
+                        on_chain_id=on_chain_id,
                     )
                 )
         elif len(markets) == 1:
@@ -217,4 +226,4 @@ class PredictAPI:
                     )
                 )
 
-        return title, outcomes
+        return title, outcomes, cat_data

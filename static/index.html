@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Predict.fun — Farming Bot</title>
+<title>Predict.fun — Фармінг Бот</title>
 <style>
   :root {
-    --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+    --bg: #f5f6fa; --card: #ffffff; --border: #dcdde1;
     --accent: #6c5ce7; --green: #00b894; --red: #d63031;
-    --text: #dfe6e9; --muted: #636e72;
+    --text: #2d3436; --muted: #636e72;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -21,12 +21,13 @@
   .card {
     background: var(--card); border: 1px solid var(--border);
     border-radius: 10px; padding: 18px; margin-bottom: 16px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
   }
   label { display: block; font-size: 0.85em; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
   input, select {
     width: 100%; padding: 8px 12px;
     border: 1px solid var(--border); border-radius: 6px;
-    background: var(--bg); color: var(--text); font-size: 0.95em;
+    background: #fff; color: var(--text); font-size: 0.95em;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
   .row { display: flex; gap: 12px; }
@@ -46,86 +47,86 @@
     padding: 8px 16px; border: 2px solid var(--border);
     border-radius: 6px; background: transparent; color: var(--text); cursor: pointer;
   }
-  .outcome-btn.selected { border-color: var(--accent); background: rgba(108,92,231,0.15); }
+  .outcome-btn.selected { border-color: var(--accent); background: rgba(108,92,231,0.1); }
   table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
   th { text-align: left; padding: 8px 6px; color: var(--muted); border-bottom: 1px solid var(--border); font-weight: 500; }
   td { padding: 8px 6px; border-bottom: 1px solid var(--border); }
   .price { font-family: monospace; }
   .error-text { color: var(--red); font-size: 0.8em; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75em; font-weight: 600; }
-  .badge-green { background: rgba(0,184,148,0.2); color: var(--green); }
-  .badge-red { background: rgba(214,48,49,0.2); color: var(--red); }
-  .badge-grey { background: rgba(99,110,114,0.2); color: var(--muted); }
+  .badge-green { background: rgba(0,184,148,0.15); color: var(--green); }
+  .badge-red { background: rgba(214,48,49,0.15); color: var(--red); }
+  .badge-grey { background: rgba(99,110,114,0.15); color: var(--muted); }
   #market-info { margin-top: 10px; font-weight: 600; }
 </style>
 </head>
 <body>
 
-<h1>Predict.fun — Farming Bot</h1>
+<h1>Predict.fun — Фармінг Бот</h1>
 
 <div class="card">
-  <h2>Nova sesiia</h2>
-  <label>Posylannia na podiiu</label>
+  <h2>Нова сесія</h2>
+  <label>Посилання на подію</label>
   <div class="row">
     <input type="text" id="market-url" placeholder="https://predict.fun/market/...">
-    <button class="btn-secondary" id="btn-load" style="flex:0 0 auto; width:140px;">Zavantazhyty</button>
+    <button class="btn-secondary" id="btn-load" style="flex:0 0 auto; width:160px;">Завантажити</button>
   </div>
   <div id="market-info"></div>
   <div id="outcome-selector" style="display:none;">
-    <label>Outcome</label>
+    <label>Результат</label>
     <div class="outcomes-row" id="outcomes-row"></div>
   </div>
 
   <div class="row" style="margin-top:10px;">
     <div>
-      <label>Side</label>
+      <label>Сторона</label>
       <select id="side">
-        <option value="0">BUY</option>
-        <option value="1">SELL</option>
+        <option value="0">КУПИТИ</option>
+        <option value="1">ПРОДАТИ</option>
       </select>
     </div>
     <div>
-      <label>Shares</label>
+      <label>Шейрсів</label>
       <input type="number" id="shares" value="200" min="1">
     </div>
     <div>
-      <label>Max spread (cents)</label>
+      <label>Макс. спред (центи)</label>
       <input type="number" id="max-spread" value="3" min="1" max="50">
     </div>
   </div>
 
   <div class="row">
     <div>
-      <label>Match start (UTC)</label>
+      <label>Початок матчу (UTC)</label>
       <input type="datetime-local" id="cutoff-utc">
     </div>
     <div>
-      <label>Stop N min before</label>
+      <label>Зупинити за N хв до</label>
       <input type="number" id="cutoff-minutes" value="30" min="0">
     </div>
   </div>
 
   <div style="margin-top:16px;">
-    <button class="btn-primary" id="btn-start">Start farming</button>
+    <button class="btn-primary" id="btn-start">Почати фармінг</button>
   </div>
 </div>
 
 <div class="card">
-  <h2>Active sessions</h2>
+  <h2>Активні сесії</h2>
   <table>
     <thead>
       <tr>
         <th>ID</th>
-        <th>Event / Outcome</th>
-        <th>Side</th>
-        <th>Order (c)</th>
-        <th>Bid / Ask</th>
-        <th>Status</th>
+        <th>Подія / Результат</th>
+        <th>Сторона</th>
+        <th>Ордер (ц)</th>
+        <th>Бід / Аск</th>
+        <th>Статус</th>
         <th></th>
       </tr>
     </thead>
     <tbody id="sessions-body">
-      <tr><td colspan="7" style="text-align:center;color:var(--muted);">No active sessions</td></tr>
+      <tr><td colspan="7" style="text-align:center;color:var(--muted);">Немає активних сесій</td></tr>
     </tbody>
   </table>
 </div>
@@ -141,11 +142,11 @@ async function resolveMarket() {
   var url = document.getElementById("market-url").value.trim();
   if (!url) return;
   var info = document.getElementById("market-info");
-  info.textContent = "Loading...";
+  info.textContent = "Завантаження...";
   try {
     var resp = await fetch("/api/resolve-market?url=" + encodeURIComponent(url));
     var data = await resp.json();
-    if (data.error) { info.textContent = "Error: " + data.error; return; }
+    if (data.error) { info.textContent = "Помилка: " + data.error; return; }
     marketData = data;
     info.textContent = data.title;
     var row = document.getElementById("outcomes-row");
@@ -159,7 +160,7 @@ async function resolveMarket() {
       row.appendChild(btn);
     });
     document.getElementById("outcome-selector").style.display = "block";
-  } catch(e) { info.textContent = "Error: " + e.message; }
+  } catch(e) { info.textContent = "Помилка: " + e.message; }
 }
 
 function selectOutcome(idx) {
@@ -172,7 +173,7 @@ function selectOutcome(idx) {
 }
 
 async function createSession() {
-  if (!selectedOutcome) { alert("Select an outcome first"); return; }
+  if (!selectedOutcome) { alert("Спочатку оберіть результат"); return; }
   var cutoffInput = document.getElementById("cutoff-utc").value;
   var payload = {
     market_id: selectedOutcome.market_id,
@@ -195,13 +196,13 @@ async function createSession() {
       body: JSON.stringify(payload)
     });
     var data = await resp.json();
-    if (data.error) { alert("Error: " + data.error); return; }
+    if (data.error) { alert("Помилка: " + data.error); return; }
     refreshSessions();
-  } catch(e) { alert("Error: " + e.message); }
+  } catch(e) { alert("Помилка: " + e.message); }
 }
 
 async function stopSession(id) {
-  if (!confirm("Stop session " + id + "?")) return;
+  if (!confirm("Зупинити сесію " + id + "?")) return;
   await fetch("/api/sessions/" + id, { method: "DELETE" });
   refreshSessions();
 }
@@ -212,20 +213,20 @@ async function refreshSessions() {
     var data = await resp.json();
     var tbody = document.getElementById("sessions-body");
     if (!data.sessions || !data.sessions.length) {
-      tbody.innerHTML = "<tr><td colspan=\"7\" style=\"text-align:center;color:var(--muted);\">No active sessions</td></tr>";
+      tbody.innerHTML = "<tr><td colspan=\"7\" style=\"text-align:center;color:var(--muted);\">Немає активних сесій</td></tr>";
       return;
     }
     var html = "";
     for (var i = 0; i < data.sessions.length; i++) {
       var s = data.sessions[i];
-      var statusText = "Stopped";
+      var statusText = "Зупинено";
       var badge = "badge-grey";
-      if (s.active && !s.is_expired) { statusText = "Active"; badge = "badge-green"; }
-      else if (s.is_expired) { statusText = "Deadline"; badge = "badge-red"; }
+      if (s.active && !s.is_expired) { statusText = "Активна"; badge = "badge-green"; }
+      else if (s.is_expired) { statusText = "Дедлайн"; badge = "badge-red"; }
       var errHtml = s.error ? "<br><span class=\"error-text\">" + s.error + "</span>" : "";
-      var orderPrice = s.current_order_price_cents !== null ? s.current_order_price_cents + "c" : "\u2014";
+      var orderPrice = s.current_order_price_cents !== null ? s.current_order_price_cents + "ц" : "\u2014";
       var bidAsk = (s.last_top_bid !== null ? s.last_top_bid : "\u2014") + " / " + (s.last_top_ask !== null ? s.last_top_ask : "\u2014");
-      var stopBtn = s.active ? "<button class=\"btn-danger\" data-stop=\"" + s.session_id + "\">Stop</button>" : "";
+      var stopBtn = s.active ? "<button class=\"btn-danger\" data-stop=\"" + s.session_id + "\">Зупинити</button>" : "";
       html += "<tr>";
       html += "<td>" + s.session_id + "</td>";
       html += "<td>" + s.market_title + "<br><strong>" + s.outcome_name + "</strong></td>";

@@ -100,7 +100,7 @@ async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"Завантажую подію: {slug} ...")
 
     try:
-        title, outcomes = await api.get_outcomes_from_slug(slug)
+        title, outcomes, _ = await api.get_outcomes_from_slug(slug)
     except Exception as e:
         logger.error("Failed to fetch category %s: %s", slug, e)
         await update.message.reply_text(f"Помилка завантаження події: {e}")

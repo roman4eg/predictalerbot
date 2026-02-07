@@ -64,12 +64,10 @@ async def resolve_market(url: str):
 
     slug = m.group(1)
     try:
-        title, outcomes = await api.get_outcomes_from_slug(slug)
+        title, outcomes, cat_data = await api.get_outcomes_from_slug(slug)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
 
-    cat = await api.get_category_by_slug(slug)
-    cat_data = cat.get("data", cat)
     markets = cat_data.get("markets", [])
 
     result_outcomes = []
