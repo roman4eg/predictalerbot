@@ -320,25 +320,48 @@ class FarmingEngine:
         resp.raise_for_status()
 
         resp_data = resp.json().get("data", {})
-        # Store both: API may return an id different from the hash
-        s.current_order_id = resp_data.get("id") or resp_data.get("orderHash") or order_hash
         s.current_order_hash = resp_data.get("orderHash") or order_hash
+
+        # Fetch numeric order id via GET /v1/orders/{hash}
+        # (POST /v1/orders only returns hash, but /v1/orders/remove needs numeric id)
+        try:
+            id_resp = await self.api.client.get(f"/v1/orders/{s.current_order_hash}")
+            id_resp.raise_for_status()
+            s.current_order_id = id_resp.json().get("data", {}).get("id")
+        except Exception as e:
+            logger.warning("Could not fetch order id for %s: %s", s.current_order_hash[:12], e)
+            s.current_order_id = None
+
         s.current_order_price_cents = price_cents
         s.placed_count += 1
 
         logger.info("Session %s: placed %s order at %d¢ (id: %s, hash: %s)",
                      s.session_id, "BUY" if s.side == 0 else "SELL",
-                     price_cents, s.current_order_id[:12], s.current_order_hash[:12])
+                     price_cents, s.current_order_id or "?", s.current_order_hash[:12])
 
     async def _cancel_current_order(self, s: FarmingSession) -> None:
-        order_id = s.current_order_id or s.current_order_hash
-        if order_id is None:
+        if s.current_order_id is None and s.current_order_hash is None:
+            return
+
+        # If we don't have numeric id yet, try fetching it now
+        if s.current_order_id is None and s.current_order_hash:
+            try:
+                id_resp = await self.api.client.get(f"/v1/orders/{s.current_order_hash}")
+                id_resp.raise_for_status()
+                s.current_order_id = id_resp.json().get("data", {}).get("id")
+            except Exception as e:
+                logger.warning("Could not fetch order id for cancel: %s", e)
+
+        if s.current_order_id is None:
+            logger.warning("Session %s: no numeric order id, cannot cancel via API", s.session_id)
+            s.current_order_hash = None
+            s.current_order_price_cents = None
             return
 
         try:
             resp = await self.api.client.post(
                 "/v1/orders/remove",
-                json={"data": {"ids": [order_id]}},
+                json={"data": {"ids": [s.current_order_id]}},
             )
             if resp.status_code >= 400:
                 logger.warning("Cancel order response (%s): %s", resp.status_code, resp.text)
@@ -347,10 +370,10 @@ class FarmingEngine:
             removed = resp_body.get("removed", [])
             noop = resp_body.get("noop", [])
             s.cancelled_count += 1
-            logger.info("Session %s: cancelled order %s (removed=%s, noop=%s)",
-                         s.session_id, order_id[:12], removed, noop)
+            logger.info("Session %s: cancelled order id=%s (removed=%s, noop=%s)",
+                         s.session_id, s.current_order_id, removed, noop)
         except Exception as e:
-            logger.warning("Failed to cancel order %s: %s", order_id, e)
+            logger.warning("Failed to cancel order %s: %s", s.current_order_id, e)
         finally:
             s.current_order_id = None
             s.current_order_hash = None
