@@ -43,7 +43,7 @@ class FarmingSession:
     token_id: str  # outcome onChainId
     outcome_name: str
     side: int  # Side.BUY = 0, Side.SELL = 1
-    shares_wei: int  # quantity of shares in wei
+    shares_wei: int  # quantity of shares in wei (0 = use max from balance)
     max_spread_cents: int  # e.g. 3
     depth_cents: int  # how many cents behind top bid to place order
     stop_at: datetime | None  # when to stop farming (UTC)
@@ -260,11 +260,30 @@ class FarmingEngine:
     async def _place_order(self, s: FarmingSession, price_cents: int) -> None:
         price_wei = _cents_to_wei(price_cents)
 
+        # Recalculate shares from balance if use_max (shares_wei == 0)
+        quantity_wei = s.shares_wei
+        if quantity_wei == 0:
+            try:
+                balance_wei = await self.builder.balance_of_async("USDT")
+                # cost per share = price_wei / WEI in USDT terms
+                # max_shares = balance / price_per_share
+                if price_wei > 0:
+                    quantity_wei = (balance_wei * WEI) // price_wei
+                if quantity_wei <= 0:
+                    s.error = "Insufficient balance"
+                    return
+                logger.info("Session %s: calculated %d shares from balance (price %d¢)",
+                            s.session_id, quantity_wei // WEI, price_cents)
+            except Exception as e:
+                s.error = f"Balance check failed: {e}"
+                logger.warning("Session %s: balance check failed: %s", s.session_id, e)
+                return
+
         amounts = self.builder.get_limit_order_amounts(
             LimitHelperInput(
                 side=Side(s.side),
                 price_per_share_wei=price_wei,
-                quantity_wei=s.shares_wei,
+                quantity_wei=quantity_wei,
             )
         )
 

@@ -121,6 +121,20 @@ async def get_balance():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@app.get("/api/orderbook")
+async def get_orderbook(market_id: int):
+    """Get current orderbook top bid/ask for a market."""
+    try:
+        ob = await api.get_orderbook(market_id)
+        return {
+            "market_id": ob.market_id,
+            "top_bid": ob.top_bid_price,
+            "top_ask": ob.top_ask_price,
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+
 @app.post("/api/sessions")
 async def create_session(request: Request):
     """Create a new farming session."""
@@ -130,8 +144,9 @@ async def create_session(request: Request):
     if body.get("stop_at"):
         stop_at = datetime.fromisoformat(body["stop_at"]).replace(tzinfo=timezone.utc)
 
-    shares = float(body.get("shares", 200))
-    shares_wei = int(shares * WEI)
+    shares = float(body.get("shares", 0))
+    use_max = body.get("use_max", False)
+    shares_wei = 0 if use_max else int(shares * WEI)
 
     session = FarmingSession(
         session_id=str(uuid.uuid4())[:8],

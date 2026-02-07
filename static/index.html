@@ -59,11 +59,13 @@
   .badge-red { background: rgba(214,48,49,0.15); color: var(--red); }
   .badge-grey { background: rgba(99,110,114,0.15); color: var(--muted); }
   #market-info { margin-top: 10px; font-weight: 600; }
-  .balance-info { margin-top: 8px; font-size: 0.85em; color: var(--muted); }
-  .balance-info strong { color: var(--text); }
+  .info-line { font-size: 0.85em; color: var(--muted); margin-top: 6px; }
+  .info-line strong { color: var(--text); }
   .shares-row { display: flex; gap: 8px; align-items: flex-end; }
   .shares-row input { flex: 1; }
   .shares-row button { flex: 0 0 auto; margin-bottom: 0; }
+  .ob-info { margin-top: 8px; padding: 8px 12px; background: var(--bg); border-radius: 6px; font-size: 0.85em; }
+  .ob-info span { margin-right: 16px; }
 </style>
 </head>
 <body>
@@ -82,6 +84,7 @@
     <label>Результат</label>
     <div class="outcomes-row" id="outcomes-row"></div>
   </div>
+  <div id="orderbook-info" class="ob-info" style="display:none;"></div>
 
   <div class="row" style="margin-top:10px;">
     <div>
@@ -94,10 +97,10 @@
     <div>
       <label>Шейрсів</label>
       <div class="shares-row">
-        <input type="number" id="shares" value="200" min="1">
+        <input type="number" id="shares" value="" min="1" placeholder="к-сть шейрсів">
         <button class="btn-secondary btn-small" id="btn-max">MAX</button>
       </div>
-      <div class="balance-info" id="balance-info"></div>
+      <div class="info-line" id="balance-info"></div>
     </div>
   </div>
 
@@ -117,8 +120,7 @@
       <label>Зупинити о (UTC)</label>
       <input type="datetime-local" id="stop-at">
     </div>
-    <div style="flex:0 0 auto; display:flex; align-items:flex-end;">
-    </div>
+    <div style="flex:0 0 auto; display:flex; align-items:flex-end;"></div>
   </div>
 
   <div style="margin-top:16px;">
@@ -150,10 +152,14 @@
 var selectedOutcome = null;
 var marketData = null;
 var currentBalance = null;
+var currentTopBid = null;
+var currentTopAsk = null;
+var useMax = false;
 
 document.getElementById("btn-load").addEventListener("click", resolveMarket);
 document.getElementById("btn-start").addEventListener("click", createSession);
 document.getElementById("btn-max").addEventListener("click", setMaxShares);
+document.getElementById("depth").addEventListener("change", updateTargetPrice);
 
 fetchBalance();
 
@@ -163,26 +169,72 @@ async function fetchBalance() {
     var data = await resp.json();
     if (data.balance !== undefined) {
       currentBalance = data.balance;
-      document.getElementById("balance-info").innerHTML =
-        "Баланс: <strong>" + currentBalance.toFixed(2) + " USDT</strong>";
+      updateBalanceDisplay();
     }
   } catch(e) { console.error("balance fetch error:", e); }
 }
 
+async function fetchOrderbook(marketId) {
+  try {
+    var resp = await fetch("/api/orderbook?market_id=" + marketId);
+    var data = await resp.json();
+    if (data.error) return;
+    currentTopBid = data.top_bid;
+    currentTopAsk = data.top_ask;
+    updateTargetPrice();
+  } catch(e) { console.error("orderbook fetch error:", e); }
+}
+
+function getTargetCents() {
+  if (currentTopBid === null) return null;
+  var depthCents = parseInt(document.getElementById("depth").value) || 1;
+  var side = parseInt(document.getElementById("side").value);
+  var topBidCents = Math.round(currentTopBid * 100);
+  var topAskCents = currentTopAsk !== null ? Math.round(currentTopAsk * 100) : topBidCents + 2;
+  if (side === 0) {
+    return topBidCents - depthCents;
+  } else {
+    return topAskCents + depthCents;
+  }
+}
+
+function updateTargetPrice() {
+  var obDiv = document.getElementById("orderbook-info");
+  if (currentTopBid === null) { obDiv.style.display = "none"; return; }
+  var topBidCents = Math.round(currentTopBid * 100);
+  var topAskCents = currentTopAsk !== null ? Math.round(currentTopAsk * 100) : "—";
+  var targetCents = getTargetCents();
+  obDiv.style.display = "block";
+  obDiv.innerHTML =
+    "<span>Топ бід: <strong>" + topBidCents + "ц</strong></span>" +
+    "<span>Топ аск: <strong>" + topAskCents + "ц</strong></span>" +
+    "<span>Наш ордер буде: <strong>" + targetCents + "ц</strong></span>";
+  updateBalanceDisplay();
+}
+
+function updateBalanceDisplay() {
+  var el = document.getElementById("balance-info");
+  if (currentBalance === null) { el.textContent = ""; return; }
+  var targetCents = getTargetCents();
+  var maxStr = "";
+  if (targetCents !== null && targetCents > 0) {
+    var priceUsd = targetCents / 100;
+    var maxShares = Math.floor(currentBalance / priceUsd);
+    maxStr = " | Макс за " + targetCents + "ц: <strong>" + maxShares + " шейрсів</strong>";
+  }
+  el.innerHTML = "Баланс: <strong>" + currentBalance.toFixed(2) + " USDT</strong>" + maxStr;
+}
+
 function setMaxShares() {
   if (currentBalance === null) { alert("Баланс ще не завантажено"); return; }
-  if (!selectedOutcome) { alert("Спочатку оберіть результат"); return; }
-  var depthCents = parseInt(document.getElementById("depth").value) || 1;
-  var topBid = 50;
-  var priceCents = topBid - depthCents;
-  if (priceCents <= 0) priceCents = 1;
-  var priceUsd = priceCents / 100;
+  var targetCents = getTargetCents();
+  if (targetCents === null || targetCents <= 0) { alert("Спочатку оберіть результат"); return; }
+  var priceUsd = targetCents / 100;
   var maxShares = Math.floor(currentBalance / priceUsd);
   if (maxShares < 1) maxShares = 1;
   document.getElementById("shares").value = maxShares;
-  document.getElementById("balance-info").innerHTML =
-    "Баланс: <strong>" + currentBalance.toFixed(2) + " USDT</strong>" +
-    " | Макс шейрсів за ~" + priceCents + "ц: <strong>" + maxShares + "</strong>";
+  useMax = true;
+  updateBalanceDisplay();
 }
 
 async function resolveMarket() {
@@ -190,6 +242,9 @@ async function resolveMarket() {
   if (!url) return;
   var info = document.getElementById("market-info");
   info.textContent = "Завантаження...";
+  currentTopBid = null;
+  currentTopAsk = null;
+  document.getElementById("orderbook-info").style.display = "none";
   try {
     var resp = await fetch("/api/resolve-market?url=" + encodeURIComponent(url));
     var data = await resp.json();
@@ -218,10 +273,13 @@ function selectOutcome(idx) {
     if (i === idx) { buttons[i].classList.add("selected"); }
     else { buttons[i].classList.remove("selected"); }
   }
+  fetchOrderbook(selectedOutcome.market_id);
 }
 
 async function createSession() {
   if (!selectedOutcome) { alert("Спочатку оберіть результат"); return; }
+  var sharesVal = document.getElementById("shares").value.trim();
+  var sharesNum = parseFloat(sharesVal) || 0;
   var stopAtInput = document.getElementById("stop-at").value;
   var payload = {
     market_id: selectedOutcome.market_id,
@@ -229,7 +287,8 @@ async function createSession() {
     token_id: selectedOutcome.on_chain_id,
     outcome_name: selectedOutcome.name,
     side: parseInt(document.getElementById("side").value),
-    shares: parseFloat(document.getElementById("shares").value),
+    shares: sharesNum,
+    use_max: useMax && sharesNum === 0,
     max_spread_cents: parseInt(document.getElementById("max-spread").value),
     depth_cents: parseInt(document.getElementById("depth").value),
     stop_at: stopAtInput ? stopAtInput + ":00" : null,
@@ -245,6 +304,7 @@ async function createSession() {
     });
     var data = await resp.json();
     if (data.error) { alert("Помилка: " + data.error); return; }
+    useMax = false;
     refreshSessions();
   } catch(e) { alert("Помилка: " + e.message); }
 }
