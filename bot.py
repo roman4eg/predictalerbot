@@ -28,6 +28,24 @@ PREDICT_API_KEY = os.environ["PREDICT_API_KEY"]
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 WALLET_POLL_INTERVAL = int(os.getenv("WALLET_POLL_INTERVAL", "30"))
 
+
+def _parse_proxy() -> str | None:
+    raw = os.getenv("PROXY", "").strip()
+    if not raw:
+        return None
+    if raw.startswith("http://") or raw.startswith("https://") or raw.startswith("socks"):
+        return raw
+    parts = raw.split(":")
+    if len(parts) == 4:
+        host, port, user, pwd = parts
+        return f"http://{user}:{pwd}@{host}:{port}"
+    if len(parts) == 2:
+        return f"http://{parts[0]}:{parts[1]}"
+    return f"http://{raw}"
+
+
+PROXY_URL = _parse_proxy()
+
 # Regex to extract slug from predict.fun URL
 SLUG_RE = re.compile(r"predict\.fun/market/([A-Za-z0-9_-]+)")
 
@@ -459,7 +477,7 @@ async def poll_wallets(app: Application) -> None:
 
 async def post_init(app: Application) -> None:
     global api
-    api = PredictAPI(PREDICT_API_KEY)
+    api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
     asyncio.create_task(poll_orderbooks(app))
     asyncio.create_task(poll_wallets(app))
 

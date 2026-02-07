@@ -45,8 +45,8 @@ class FarmingSession:
     side: int  # Side.BUY = 0, Side.SELL = 1
     shares_wei: int  # quantity of shares in wei
     max_spread_cents: int  # e.g. 3
-    cutoff_utc: datetime | None  # stop farming before this time
-    cutoff_minutes_before: int  # stop N minutes before cutoff_utc
+    depth_cents: int  # how many cents behind top bid to place order
+    stop_at: datetime | None  # when to stop farming (UTC)
     is_neg_risk: bool
     is_yield_bearing: bool
     fee_rate_bps: int
@@ -64,18 +64,10 @@ class FarmingSession:
     created_at: float = field(default_factory=time.time)
 
     @property
-    def deadline(self) -> datetime | None:
-        if self.cutoff_utc is None:
-            return None
-        from datetime import timedelta
-        return self.cutoff_utc - timedelta(minutes=self.cutoff_minutes_before)
-
-    @property
     def is_expired(self) -> bool:
-        dl = self.deadline
-        if dl is None:
+        if self.stop_at is None:
             return False
-        return datetime.now(timezone.utc) >= dl
+        return datetime.now(timezone.utc) >= self.stop_at
 
     def to_dict(self) -> dict:
         return {
@@ -86,8 +78,8 @@ class FarmingSession:
             "side": "BUY" if self.side == 0 else "SELL",
             "shares": self.shares_wei / WEI,
             "max_spread_cents": self.max_spread_cents,
-            "cutoff_utc": self.cutoff_utc.isoformat() if self.cutoff_utc else None,
-            "cutoff_minutes_before": self.cutoff_minutes_before,
+            "depth_cents": self.depth_cents,
+            "stop_at": self.stop_at.isoformat() if self.stop_at else None,
             "active": self.active,
             "is_expired": self.is_expired,
             "current_order_hash": self.current_order_hash,
@@ -142,6 +134,11 @@ class FarmingEngine:
             session.active = False
             logger.info("Removed farming session %s", session_id)
         return session
+
+    async def get_balance_usdt(self) -> float:
+        """Get available USDT balance (human-readable)."""
+        balance_wei = await self.builder.balance_of_async("USDT")
+        return balance_wei / WEI
 
     async def authenticate(self) -> None:
         """Obtain JWT token via predict.fun auth flow and set Authorization header."""
@@ -229,14 +226,15 @@ class FarmingEngine:
 
         s.error = None
 
-        # Target price: one cent behind top bid (for BUY side)
+        # Target price: N cents behind top bid (for BUY side)
+        depth = s.depth_cents
         if s.side == Side.BUY:
-            target_cents = top_bid_cents - 1
+            target_cents = top_bid_cents - depth
             min_allowed = top_ask_cents - s.max_spread_cents * 2
             if target_cents < min_allowed:
                 target_cents = min_allowed
         else:
-            target_cents = top_ask_cents + 1
+            target_cents = top_ask_cents + depth
             max_allowed = top_bid_cents + s.max_spread_cents * 2
             if target_cents > max_allowed:
                 target_cents = max_allowed

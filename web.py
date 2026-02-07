@@ -26,6 +26,25 @@ PREDICT_API_KEY = os.environ["PREDICT_API_KEY"]
 PRIVATE_KEY = os.environ["WALLET_PRIVATE_KEY"]
 PREDICT_ACCOUNT = os.getenv("PREDICT_ACCOUNT", "")
 
+
+def _parse_proxy() -> str | None:
+    """Parse PROXY env var.  Accepts ip:port:user:pass or full URL."""
+    raw = os.getenv("PROXY", "").strip()
+    if not raw:
+        return None
+    if raw.startswith("http://") or raw.startswith("https://") or raw.startswith("socks"):
+        return raw
+    parts = raw.split(":")
+    if len(parts) == 4:
+        host, port, user, pwd = parts
+        return f"http://{user}:{pwd}@{host}:{port}"
+    if len(parts) == 2:
+        return f"http://{parts[0]}:{parts[1]}"
+    return f"http://{raw}"
+
+
+PROXY_URL = _parse_proxy()
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 api: PredictAPI | None = None
@@ -37,7 +56,9 @@ app = FastAPI(title="Predict.fun Farming Bot")
 @app.on_event("startup")
 async def startup():
     global api, engine
-    api = PredictAPI(PREDICT_API_KEY)
+    api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
+    if PROXY_URL:
+        logger.info("Using proxy: %s", PROXY_URL.split("@")[-1])
     engine = FarmingEngine(
         api, PREDICT_API_KEY, PRIVATE_KEY,
         predict_account=PREDICT_ACCOUNT or None,
@@ -90,14 +111,24 @@ async def resolve_market(url: str):
     }
 
 
+@app.get("/api/balance")
+async def get_balance():
+    """Get available USDT balance."""
+    try:
+        balance = await engine.get_balance_usdt()
+        return {"balance": balance}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/sessions")
 async def create_session(request: Request):
     """Create a new farming session."""
     body = await request.json()
 
-    cutoff_utc = None
-    if body.get("cutoff_utc"):
-        cutoff_utc = datetime.fromisoformat(body["cutoff_utc"]).replace(tzinfo=timezone.utc)
+    stop_at = None
+    if body.get("stop_at"):
+        stop_at = datetime.fromisoformat(body["stop_at"]).replace(tzinfo=timezone.utc)
 
     shares = float(body.get("shares", 200))
     shares_wei = int(shares * WEI)
@@ -111,8 +142,8 @@ async def create_session(request: Request):
         side=int(body.get("side", 0)),
         shares_wei=shares_wei,
         max_spread_cents=int(body.get("max_spread_cents", 3)),
-        cutoff_utc=cutoff_utc,
-        cutoff_minutes_before=int(body.get("cutoff_minutes_before", 30)),
+        depth_cents=int(body.get("depth_cents", 1)),
+        stop_at=stop_at,
         is_neg_risk=body.get("is_neg_risk", False),
         is_yield_bearing=body.get("is_yield_bearing", False),
         fee_rate_bps=int(body.get("fee_rate_bps", 0)),

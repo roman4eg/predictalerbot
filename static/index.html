@@ -41,6 +41,7 @@
   .btn-danger { background: var(--red); color: #fff; font-size: 0.8em; padding: 6px 12px; }
   .btn-danger:hover { opacity: 0.85; }
   .btn-secondary { background: var(--border); color: var(--text); }
+  .btn-small { padding: 6px 12px; font-size: 0.8em; }
   #outcome-selector { margin-top: 10px; }
   .outcomes-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
   .outcome-btn {
@@ -58,6 +59,11 @@
   .badge-red { background: rgba(214,48,49,0.15); color: var(--red); }
   .badge-grey { background: rgba(99,110,114,0.15); color: var(--muted); }
   #market-info { margin-top: 10px; font-weight: 600; }
+  .balance-info { margin-top: 8px; font-size: 0.85em; color: var(--muted); }
+  .balance-info strong { color: var(--text); }
+  .shares-row { display: flex; gap: 8px; align-items: flex-end; }
+  .shares-row input { flex: 1; }
+  .shares-row button { flex: 0 0 auto; margin-bottom: 0; }
 </style>
 </head>
 <body>
@@ -87,7 +93,18 @@
     </div>
     <div>
       <label>Шейрсів</label>
-      <input type="number" id="shares" value="200" min="1">
+      <div class="shares-row">
+        <input type="number" id="shares" value="200" min="1">
+        <button class="btn-secondary btn-small" id="btn-max">MAX</button>
+      </div>
+      <div class="balance-info" id="balance-info"></div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>Глибина (центів від топ біду)</label>
+      <input type="number" id="depth" value="1" min="1" max="50">
     </div>
     <div>
       <label>Макс. спред (центи)</label>
@@ -97,12 +114,10 @@
 
   <div class="row">
     <div>
-      <label>Початок матчу (UTC)</label>
-      <input type="datetime-local" id="cutoff-utc">
+      <label>Зупинити о (UTC)</label>
+      <input type="datetime-local" id="stop-at">
     </div>
-    <div>
-      <label>Зупинити за N хв до</label>
-      <input type="number" id="cutoff-minutes" value="30" min="0">
+    <div style="flex:0 0 auto; display:flex; align-items:flex-end;">
     </div>
   </div>
 
@@ -134,9 +149,41 @@
 <script>
 var selectedOutcome = null;
 var marketData = null;
+var currentBalance = null;
 
 document.getElementById("btn-load").addEventListener("click", resolveMarket);
 document.getElementById("btn-start").addEventListener("click", createSession);
+document.getElementById("btn-max").addEventListener("click", setMaxShares);
+
+fetchBalance();
+
+async function fetchBalance() {
+  try {
+    var resp = await fetch("/api/balance");
+    var data = await resp.json();
+    if (data.balance !== undefined) {
+      currentBalance = data.balance;
+      document.getElementById("balance-info").innerHTML =
+        "Баланс: <strong>" + currentBalance.toFixed(2) + " USDT</strong>";
+    }
+  } catch(e) { console.error("balance fetch error:", e); }
+}
+
+function setMaxShares() {
+  if (currentBalance === null) { alert("Баланс ще не завантажено"); return; }
+  if (!selectedOutcome) { alert("Спочатку оберіть результат"); return; }
+  var depthCents = parseInt(document.getElementById("depth").value) || 1;
+  var topBid = 50;
+  var priceCents = topBid - depthCents;
+  if (priceCents <= 0) priceCents = 1;
+  var priceUsd = priceCents / 100;
+  var maxShares = Math.floor(currentBalance / priceUsd);
+  if (maxShares < 1) maxShares = 1;
+  document.getElementById("shares").value = maxShares;
+  document.getElementById("balance-info").innerHTML =
+    "Баланс: <strong>" + currentBalance.toFixed(2) + " USDT</strong>" +
+    " | Макс шейрсів за ~" + priceCents + "ц: <strong>" + maxShares + "</strong>";
+}
 
 async function resolveMarket() {
   var url = document.getElementById("market-url").value.trim();
@@ -160,6 +207,7 @@ async function resolveMarket() {
       row.appendChild(btn);
     });
     document.getElementById("outcome-selector").style.display = "block";
+    fetchBalance();
   } catch(e) { info.textContent = "Помилка: " + e.message; }
 }
 
@@ -174,7 +222,7 @@ function selectOutcome(idx) {
 
 async function createSession() {
   if (!selectedOutcome) { alert("Спочатку оберіть результат"); return; }
-  var cutoffInput = document.getElementById("cutoff-utc").value;
+  var stopAtInput = document.getElementById("stop-at").value;
   var payload = {
     market_id: selectedOutcome.market_id,
     market_title: marketData.title,
@@ -183,8 +231,8 @@ async function createSession() {
     side: parseInt(document.getElementById("side").value),
     shares: parseFloat(document.getElementById("shares").value),
     max_spread_cents: parseInt(document.getElementById("max-spread").value),
-    cutoff_utc: cutoffInput ? cutoffInput + ":00" : null,
-    cutoff_minutes_before: parseInt(document.getElementById("cutoff-minutes").value),
+    depth_cents: parseInt(document.getElementById("depth").value),
+    stop_at: stopAtInput ? stopAtInput + ":00" : null,
     is_neg_risk: selectedOutcome.is_neg_risk,
     is_yield_bearing: selectedOutcome.is_yield_bearing,
     fee_rate_bps: selectedOutcome.fee_rate_bps

@@ -72,13 +72,16 @@ AMOUNT_DECIMALS = 18  # on-chain ERC1155 conditional tokens use 18 decimals
 
 
 class PredictAPI:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, proxy: str | None = None):
         self.api_key = api_key
-        self.client = httpx.AsyncClient(
+        client_kwargs = dict(
             base_url=API_BASE,
             headers={"x-api-key": api_key},
             timeout=15.0,
         )
+        if proxy:
+            client_kwargs["proxy"] = proxy
+        self.client = httpx.AsyncClient(**client_kwargs)
 
     async def close(self):
         await self.client.aclose()
