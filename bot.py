@@ -2,7 +2,9 @@ import asyncio
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -11,6 +13,8 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from predict_api import OrderBook, Outcome, Position, PredictAPI
@@ -27,6 +31,8 @@ TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 PREDICT_API_KEY = os.environ["PREDICT_API_KEY"]
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "10"))
 WALLET_POLL_INTERVAL = int(os.getenv("WALLET_POLL_INTERVAL", "30"))
+PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
+PREDICT_ACCOUNT = os.getenv("PREDICT_ACCOUNT", "")
 
 
 def _parse_proxy() -> str | None:
@@ -84,6 +90,12 @@ wallet_watches: dict[tuple[int, str], WalletWatch] = {}
 pending_selections: dict[int, tuple[str, str, list[Outcome]]] = {}
 
 api: PredictAPI | None = None
+engine = None  # FarmingEngine | None — initialized in post_init if PRIVATE_KEY is set
+
+# Pending farming flow state: chat_id -> {slug, title, outcomes, cat_data}
+pending_farm: dict[int, dict] = {}
+# Pending shares input: chat_id -> config dict
+pending_farm_shares: dict[int, dict] = {}
 
 
 def parse_slug(url: str) -> str | None:
@@ -92,14 +104,23 @@ def parse_slug(url: str) -> str | None:
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
+    text = (
         "Predict.fun — Трекер стакану та позицій\n\n"
         "Команди:\n"
-        "/look <посилання на подію> — підписатись на оновлення стакану\n"
-        "/subs — список активних підписок на стакан\n\n"
+        "/look <URL> — підписатись на оновлення стакану\n"
+        "/subs — список активних підписок\n\n"
         "/watch <адреса> [назва] — стежити за позиціями гаманця\n"
         "/wallets — список гаманців під стеженням\n"
     )
+    if engine is not None:
+        text += (
+            "\nФармінг:\n"
+            "/farm <URL> — створити фармінг-сесію\n"
+            "/sessions — активні фармінг-сесії\n"
+            "/stop <id> — зупинити сесію\n"
+            "/balance — баланс USDT\n"
+        )
+    await update.message.reply_text(text)
 
 
 async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -253,6 +274,289 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     )
 
 
+# --------------- Farming commands ---------------
+
+async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if engine is None:
+        await update.message.reply_text("Фармінг не налаштовано. Додайте WALLET_PRIVATE_KEY в .env")
+        return
+    if not context.args:
+        await update.message.reply_text("Використання: /farm <посилання на подію predict.fun>")
+        return
+
+    url = context.args[0]
+    slug = parse_slug(url)
+    if not slug:
+        await update.message.reply_text("Невірне посилання.")
+        return
+
+    await update.message.reply_text(f"Завантажую подію: {slug} ...")
+
+    try:
+        title, outcomes, cat_data = await api.get_outcomes_from_slug(slug)
+    except Exception as e:
+        await update.message.reply_text(f"Помилка: {e}")
+        return
+
+    if not outcomes:
+        await update.message.reply_text("Не знайдено outcomes.")
+        return
+
+    markets = cat_data.get("markets", [])
+    pending_farm[update.effective_chat.id] = {
+        "slug": slug, "title": title, "outcomes": outcomes,
+        "cat_data": cat_data, "markets": markets,
+    }
+
+    buttons = []
+    for i, o in enumerate(outcomes):
+        buttons.append([InlineKeyboardButton(o.name, callback_data=f"farm_outcome:{i}")])
+
+    await update.message.reply_text(
+        f"*{title}*\n\nОберіть outcome для фармінгу:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if engine is None:
+        await update.message.reply_text("Фармінг не налаштовано.")
+        return
+
+    if not engine.sessions:
+        await update.message.reply_text("Немає активних фармінг-сесій.")
+        return
+
+    lines = []
+    buttons = []
+    for s in engine.sessions.values():
+        status = "Активна" if s.active and not s.is_expired else ("Дедлайн" if s.is_expired else "Зупинено")
+        price_str = f"{s.current_order_price_cents}ц" if s.current_order_price_cents else "—"
+        bid_str = f"{s.last_top_bid}" if s.last_top_bid else "—"
+        ask_str = f"{s.last_top_ask}" if s.last_top_ask else "—"
+        err_str = f"\n  Помилка: {s.error}" if s.error else ""
+        shares_str = "MAX" if s.shares_wei == 0 else f"{s.shares_wei / (10**18):.0f}"
+        lines.append(
+            f"`{s.session_id}` | {s.outcome_name}\n"
+            f"  {status} | Ордер: {price_str} | Бід/Аск: {bid_str}/{ask_str}\n"
+            f"  Шейрсів: {shares_str} | Глибина: {s.depth_cents}ц{err_str}"
+        )
+        if s.active:
+            buttons.append([InlineKeyboardButton(
+                f"Зупинити {s.session_id}", callback_data=f"farm_stop:{s.session_id}"
+            )])
+
+    text = "Фармінг-сесії:\n\n" + "\n\n".join(lines)
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if engine is None:
+        await update.message.reply_text("Фармінг не налаштовано.")
+        return
+    if not context.args:
+        await update.message.reply_text("Використання: /stop <session_id>")
+        return
+
+    sid = context.args[0]
+    if sid not in engine.sessions:
+        await update.message.reply_text(f"Сесію `{sid}` не знайдено.", parse_mode="Markdown")
+        return
+
+    await engine.cancel_all_for_session(sid)
+    engine.remove_session(sid)
+    await update.message.reply_text(f"Сесію `{sid}` зупинено, ордер скасовано.", parse_mode="Markdown")
+
+
+async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if engine is None:
+        await update.message.reply_text("Фармінг не налаштовано.")
+        return
+    try:
+        balance = await engine.get_balance_usdt()
+        await update.message.reply_text(f"Баланс: *{balance:.2f} USDT*", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"Помилка отримання балансу: {e}")
+
+
+async def _handle_farm_outcome(query) -> None:
+    """User selected an outcome for farming — show orderbook + balance + share options."""
+    chat_id = query.message.chat_id
+    idx = int(query.data.split(":")[1])
+
+    farm_data = pending_farm.pop(chat_id, None)
+    if not farm_data:
+        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    outcomes = farm_data["outcomes"]
+    if idx >= len(outcomes):
+        await query.edit_message_text("Невірний вибір.")
+        return
+
+    outcome = outcomes[idx]
+    cat_data = farm_data["cat_data"]
+    markets = farm_data["markets"]
+    market = next((mk for mk in markets if mk["id"] == outcome.market_id), {})
+
+    # Fetch orderbook
+    try:
+        ob = await api.get_orderbook(outcome.market_id)
+    except Exception as e:
+        await query.edit_message_text(f"Помилка завантаження стакану: {e}")
+        return
+
+    top_bid_cents = round(ob.top_bid_price * 100) if ob.top_bid_price else 0
+    top_ask_cents = round(ob.top_ask_price * 100) if ob.top_ask_price else 0
+    target_cents = top_bid_cents - 1  # default depth=1
+
+    # Fetch balance
+    balance = 0.0
+    max_shares = 0
+    try:
+        balance = await engine.get_balance_usdt()
+        if target_cents > 0:
+            max_shares = int(balance / (target_cents / 100))
+    except Exception:
+        pass
+
+    # Store config for next step
+    config = {
+        "title": farm_data["title"],
+        "outcome": outcome,
+        "cat_data": cat_data,
+        "market": market,
+        "top_bid_cents": top_bid_cents,
+        "top_ask_cents": top_ask_cents,
+        "target_cents": target_cents,
+        "balance": balance,
+        "max_shares": max_shares,
+    }
+    pending_farm_shares[chat_id] = config
+
+    buttons = [
+        [InlineKeyboardButton(f"MAX ({max_shares} шейрсів)", callback_data="farm_max")],
+        [InlineKeyboardButton("Ввести к-сть вручну", callback_data="farm_manual")],
+    ]
+
+    await query.edit_message_text(
+        f"*{farm_data['title']}* → *{outcome.name}*\n\n"
+        f"Топ бід: *{top_bid_cents}ц* | Аск: *{top_ask_cents}ц*\n"
+        f"Наш ордер буде: *{target_cents}ц* (глибина 1ц)\n\n"
+        f"Баланс: *{balance:.2f} USDT*\n"
+        f"Макс шейрсів за {target_cents}ц: *{max_shares}*",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
+    )
+
+
+async def _create_farm_session(chat_id: int, config: dict, shares_wei: int) -> str:
+    """Create a FarmingSession from the config dict. Returns message text."""
+    from predict_bot import FarmingSession, WEI
+
+    outcome = config["outcome"]
+    cat_data = config["cat_data"]
+    market = config["market"]
+
+    session = FarmingSession(
+        session_id=str(uuid.uuid4())[:8],
+        market_id=outcome.market_id,
+        market_title=config["title"],
+        token_id=outcome.on_chain_id,
+        outcome_name=outcome.name,
+        side=0,  # BUY
+        shares_wei=shares_wei,
+        max_spread_cents=3,
+        depth_cents=1,
+        stop_at=None,
+        is_neg_risk=cat_data.get("isNegRisk", False),
+        is_yield_bearing=cat_data.get("isYieldBearing", False),
+        fee_rate_bps=market.get("feeRateBps", 0),
+    )
+
+    engine.add_session(session)
+
+    shares_str = "MAX (весь баланс)" if shares_wei == 0 else f"{shares_wei / WEI:.0f}"
+    return (
+        f"Фармінг-сесію створено!\n\n"
+        f"ID: `{session.session_id}`\n"
+        f"Подія: *{config['title']}*\n"
+        f"Outcome: *{outcome.name}*\n"
+        f"Шейрсів: *{shares_str}*\n"
+        f"Глибина: *1ц* | Спред: *3ц*\n\n"
+        f"Бот почне працювати протягом кількох секунд.\n"
+        f"Перевірити: /sessions\n"
+        f"Зупинити: /stop {session.session_id}"
+    )
+
+
+async def _handle_farm_max(query) -> None:
+    """User clicked MAX — create session with use_max."""
+    chat_id = query.message.chat_id
+    config = pending_farm_shares.pop(chat_id, None)
+    if not config:
+        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    text = await _create_farm_session(chat_id, config, shares_wei=0)
+    await query.edit_message_text(text, parse_mode="Markdown")
+
+
+async def _handle_farm_manual(query) -> None:
+    """User wants to enter shares manually."""
+    chat_id = query.message.chat_id
+    config = pending_farm_shares.get(chat_id)
+    if not config:
+        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    await query.edit_message_text(
+        f"Введіть кількість шейрсів (макс: {config['max_shares']}):",
+    )
+
+
+async def _handle_farm_stop(query) -> None:
+    """User clicked stop session button."""
+    sid = query.data.split(":")[1]
+    if sid not in engine.sessions:
+        await query.edit_message_text(f"Сесію `{sid}` не знайдено.", parse_mode="Markdown")
+        return
+
+    await engine.cancel_all_for_session(sid)
+    engine.remove_session(sid)
+    await query.edit_message_text(
+        f"Сесію `{sid}` зупинено, ордер скасовано.", parse_mode="Markdown"
+    )
+
+
+async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plain text messages — used for shares input during /farm flow."""
+    chat_id = update.effective_chat.id
+    config = pending_farm_shares.get(chat_id)
+    if not config:
+        return  # Not in farming flow, ignore
+
+    text = update.message.text.strip()
+    try:
+        shares = int(text)
+        if shares <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("Введіть ціле число більше 0.")
+        return
+
+    from predict_bot import WEI
+    pending_farm_shares.pop(chat_id, None)
+    shares_wei = shares * WEI
+    msg = await _create_farm_session(chat_id, config, shares_wei=shares_wei)
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -264,6 +568,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_unsub(query)
     elif data.startswith("unwatch:"):
         await _handle_unwatch(query)
+    elif data.startswith("farm_outcome:"):
+        await _handle_farm_outcome(query)
+    elif data == "farm_max":
+        await _handle_farm_max(query)
+    elif data == "farm_manual":
+        await _handle_farm_manual(query)
+    elif data.startswith("farm_stop:"):
+        await _handle_farm_stop(query)
 
 
 async def _handle_select_outcome(query) -> None:
@@ -476,10 +788,25 @@ async def poll_wallets(app: Application) -> None:
 
 
 async def post_init(app: Application) -> None:
-    global api
+    global api, engine
     api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
     asyncio.create_task(poll_orderbooks(app))
     asyncio.create_task(poll_wallets(app))
+
+    # Initialize farming engine if private key is configured
+    if PRIVATE_KEY:
+        from predict_bot import FarmingEngine
+        engine = FarmingEngine(
+            api, PREDICT_API_KEY, PRIVATE_KEY,
+            predict_account=PREDICT_ACCOUNT or None,
+        )
+        try:
+            await engine.authenticate()
+            engine.start()
+            logger.info("Farming engine initialized in Telegram bot")
+        except Exception as e:
+            logger.error("Failed to initialize farming engine: %s", e)
+            engine = None
 
 
 async def post_shutdown(app: Application) -> None:
@@ -501,7 +828,12 @@ def main() -> None:
     app.add_handler(CommandHandler("subs", cmd_subs))
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("wallets", cmd_wallets))
+    app.add_handler(CommandHandler("farm", cmd_farm))
+    app.add_handler(CommandHandler("sessions", cmd_sessions))
+    app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("balance", cmd_balance))
     app.add_handler(CallbackQueryHandler(handle_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Bot started. Polling interval: %ds", POLL_INTERVAL)
     app.run_polling()
