@@ -42,6 +42,7 @@ async def startup():
         api, PREDICT_API_KEY, PRIVATE_KEY,
         predict_account=PREDICT_ACCOUNT or None,
     )
+    await engine.authenticate()
     engine.start()
     logger.info("Farming web UI started")
 

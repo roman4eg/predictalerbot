@@ -142,6 +142,41 @@ class FarmingEngine:
             logger.info("Removed farming session %s", session_id)
         return session
 
+    async def authenticate(self) -> None:
+        """Obtain JWT token via predict.fun auth flow and set Authorization header."""
+        # Step 1: Get auth message
+        resp = await self.api.client.get("/v1/auth/message")
+        resp.raise_for_status()
+        body = resp.json()
+        message = body.get("data", body).get("message", body.get("message", ""))
+
+        # Step 2: Sign the message
+        if self.predict_account:
+            signature = self.builder.sign_predict_account_message(message)
+            signer = self.predict_account
+        else:
+            from eth_account import Account
+            from eth_account.messages import encode_defunct
+            account = Account.from_key(self.private_key)
+            signable = encode_defunct(text=message)
+            signed_msg = account.sign_message(signable)
+            signature = "0x" + signed_msg.signature.hex()
+            signer = account.address
+
+        # Step 3: Exchange signature for JWT
+        resp = await self.api.client.post("/v1/auth", json={
+            "signer": signer,
+            "message": message,
+            "signature": signature,
+        })
+        resp.raise_for_status()
+        jwt_body = resp.json()
+        jwt_token = jwt_body.get("data", jwt_body).get("token", "")
+
+        # Step 4: Set Authorization header on the shared client
+        self.api.client.headers["Authorization"] = f"Bearer {jwt_token}"
+        logger.info("JWT authentication successful for %s", signer[:10] + "...")
+
     def start(self) -> None:
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop())
