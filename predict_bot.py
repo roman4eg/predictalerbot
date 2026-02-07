@@ -53,6 +53,7 @@ class FarmingSession:
 
     # Runtime state
     active: bool = True
+    current_order_id: str | None = None
     current_order_hash: str | None = None
     current_order_price_cents: int | None = None
     last_top_bid: int | None = None
@@ -314,32 +315,44 @@ class FarmingEngine:
         }
 
         resp = await self.api.client.post("/v1/orders", json=payload)
+        if resp.status_code >= 400:
+            logger.error("Order placement failed (%s): %s", resp.status_code, resp.text)
         resp.raise_for_status()
 
-        s.current_order_hash = order_hash
+        resp_data = resp.json().get("data", {})
+        # Store both: API may return an id different from the hash
+        s.current_order_id = resp_data.get("id") or resp_data.get("orderHash") or order_hash
+        s.current_order_hash = resp_data.get("orderHash") or order_hash
         s.current_order_price_cents = price_cents
         s.placed_count += 1
 
-        logger.info("Session %s: placed %s order at %d¢ (hash: %s)",
+        logger.info("Session %s: placed %s order at %d¢ (id: %s, hash: %s)",
                      s.session_id, "BUY" if s.side == 0 else "SELL",
-                     price_cents, order_hash[:12])
+                     price_cents, s.current_order_id[:12], s.current_order_hash[:12])
 
     async def _cancel_current_order(self, s: FarmingSession) -> None:
-        if s.current_order_hash is None:
+        order_id = s.current_order_id or s.current_order_hash
+        if order_id is None:
             return
 
         try:
             resp = await self.api.client.post(
-                "/v1/orders/cancel",
-                json={"data": {"orderHashes": [s.current_order_hash]}},
+                "/v1/orders/remove",
+                json={"data": {"ids": [order_id]}},
             )
+            if resp.status_code >= 400:
+                logger.warning("Cancel order response (%s): %s", resp.status_code, resp.text)
             resp.raise_for_status()
+            resp_body = resp.json()
+            removed = resp_body.get("removed", [])
+            noop = resp_body.get("noop", [])
             s.cancelled_count += 1
-            logger.info("Session %s: cancelled order %s",
-                         s.session_id, s.current_order_hash[:12])
+            logger.info("Session %s: cancelled order %s (removed=%s, noop=%s)",
+                         s.session_id, order_id[:12], removed, noop)
         except Exception as e:
-            logger.warning("Failed to cancel order %s: %s", s.current_order_hash, e)
+            logger.warning("Failed to cancel order %s: %s", order_id, e)
         finally:
+            s.current_order_id = None
             s.current_order_hash = None
             s.current_order_price_cents = None
 
