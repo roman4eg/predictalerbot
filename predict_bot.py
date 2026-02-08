@@ -256,9 +256,14 @@ class FarmingEngine:
 
         # Cancel existing order and place new one
         await self._cancel_current_order(s)
+        # Re-check active flag: session may have been stopped while we were awaiting
+        if not s.active:
+            return
         await self._place_order(s, target_cents)
 
     async def _place_order(self, s: FarmingSession, price_cents: int) -> None:
+        if not s.active:
+            return
         price_wei = _cents_to_wei(price_cents)
 
         # Recalculate shares from balance if use_max (shares_wei == 0)
