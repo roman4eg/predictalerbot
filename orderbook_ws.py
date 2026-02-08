@@ -27,8 +27,23 @@ logger = logging.getLogger(__name__)
 
 WS_URL = "wss://ws.predict.fun/ws"
 HEARTBEAT_TIMEOUT = 20  # seconds — server sends every ~15s
-STALE_THRESHOLD = 30    # seconds — data older than this is considered stale
+STALE_THRESHOLD_DISCONNECTED = 60  # seconds — cache TTL when WS is down
 MAX_RECONNECT_DELAY = 60
+
+
+def _normalize_levels(raw_levels: list) -> list:
+    """Normalize orderbook levels to [[price, size], ...] format.
+
+    The WS may send levels as:
+    - [[0.40, 100], ...]              — array of arrays (same as REST)
+    - [{"price": "0.40", "size": "100"}, ...]  — array of objects
+    """
+    if not raw_levels:
+        return []
+    sample = raw_levels[0]
+    if isinstance(sample, dict):
+        return [[float(e["price"]), float(e["size"])] for e in raw_levels]
+    return [[float(e[0]), float(e[1])] for e in raw_levels]
 
 
 class OrderBookWS:
@@ -56,6 +71,10 @@ class OrderBookWS:
         # Protocol state
         self._request_id = 0
 
+        # Stats
+        self._msg_count = 0
+        self._markets_seen: set[int] = set()
+
     # ── Public API ──────────────────────────────────────────────
 
     @property
@@ -79,18 +98,28 @@ class OrderBookWS:
             self._subscriptions.discard(market_id)
             self._cache.pop(market_id, None)
             self._cache_ts.pop(market_id, None)
+            self._markets_seen.discard(market_id)
             if self.is_connected:
                 asyncio.create_task(self._send_unsubscribe(market_id))
         else:
             self._ref_counts[market_id] = count - 1
 
     def get_orderbook(self, market_id: int) -> OrderBook | None:
-        """Return the latest cached orderbook, or None if stale/missing."""
+        """Return the latest cached orderbook, or None if unavailable.
+
+        When WS is connected, the cache is always trusted — no update simply
+        means the orderbook hasn't changed.  When disconnected, a staleness
+        threshold is applied.
+        """
         ob = self._cache.get(market_id)
         if ob is None:
             return None
+        # Connected: trust the cache (no WS update = no orderbook change)
+        if self.is_connected:
+            return ob
+        # Disconnected: apply staleness check
         ts = self._cache_ts.get(market_id, 0)
-        if time.time() - ts > STALE_THRESHOLD:
+        if time.time() - ts > STALE_THRESHOLD_DISCONNECTED:
             return None
         return ob
 
@@ -155,6 +184,7 @@ class OrderBookWS:
             self._ws = ws
             self._connected.set()
             self._reconnect_delay = 1  # reset backoff on successful connect
+            self._msg_count = 0
             logger.info("OrderBookWS connected (%d subscriptions)", len(self._subscriptions))
 
             # Resubscribe to all active markets
@@ -174,7 +204,7 @@ class OrderBookWS:
                     msg = json.loads(raw)
                     await self._handle_message(msg)
                 except Exception as e:
-                    logger.warning("OrderBookWS message error: %s", e)
+                    logger.warning("OrderBookWS message error: %s (raw: %.200s)", e, raw)
 
     # ── Message handling ────────────────────────────────────────
 
@@ -190,12 +220,20 @@ class OrderBookWS:
             elif topic.startswith("predictOrderbook/"):
                 self._process_orderbook(topic, msg.get("data", {}))
 
+            else:
+                logger.debug("OrderBookWS unknown topic: %s", topic)
+
         elif msg_type == "R":
             # Ack for subscribe/unsubscribe
             req_id = msg.get("requestId")
             success = msg.get("success", True)
-            if not success:
+            if success:
+                logger.info("OrderBookWS request %s confirmed OK", req_id)
+            else:
                 logger.warning("OrderBookWS request %s failed: %s", req_id, msg)
+
+        else:
+            logger.debug("OrderBookWS unknown message type: %s", msg_type)
 
     async def _echo_heartbeat(self, ts_data) -> None:
         """Respond to server heartbeat to keep connection alive."""
@@ -210,8 +248,9 @@ class OrderBookWS:
     def _process_orderbook(self, topic: str, data: dict) -> None:
         """Update cached orderbook from a full snapshot message."""
         market_id = int(topic.split("/")[1])
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
+
+        bids = _normalize_levels(data.get("bids", []))
+        asks = _normalize_levels(data.get("asks", []))
         ts = data.get("timestamp", 0)
 
         self._cache[market_id] = OrderBook(
@@ -221,6 +260,18 @@ class OrderBookWS:
             update_timestamp_ms=ts,
         )
         self._cache_ts[market_id] = time.time()
+        self._msg_count += 1
+
+        # Log first message per market and then every 100 messages
+        if market_id not in self._markets_seen:
+            self._markets_seen.add(market_id)
+            top_bid = bids[0][0] if bids else None
+            top_ask = asks[0][0] if asks else None
+            logger.info("OrderBookWS first data for market %d: bid=%s ask=%s (%d levels)",
+                        market_id, top_bid, top_ask, len(bids) + len(asks))
+        elif self._msg_count % 100 == 0:
+            logger.info("OrderBookWS stats: %d messages received, %d markets active",
+                        self._msg_count, len(self._cache))
 
     # ── Subscribe / unsubscribe ─────────────────────────────────
 
@@ -232,7 +283,7 @@ class OrderBookWS:
                 "requestId": self._request_id,
                 "params": [f"predictOrderbook/{market_id}"],
             }))
-            logger.info("OrderBookWS subscribed to market %d (req %d)",
+            logger.info("OrderBookWS subscribing to market %d (req %d)",
                         market_id, self._request_id)
         except Exception as e:
             logger.warning("OrderBookWS subscribe failed for market %d: %s", market_id, e)

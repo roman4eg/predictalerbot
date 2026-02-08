@@ -217,12 +217,16 @@ class FarmingEngine:
 
         # Get orderbook: try WebSocket cache first, fall back to REST
         ob = None
+        source = "REST"
         if self.orderbook_ws:
             ob = self.orderbook_ws.get_orderbook(s.market_id)
-            if ob and s.invert_book:
-                ob = invert_orderbook(ob)
+            if ob is not None:
+                source = "WS"
+                if s.invert_book:
+                    ob = invert_orderbook(ob)
         if ob is None:
             ob = await self.api.get_orderbook(s.market_id, invert=s.invert_book)
+            source = "REST"
 
         top_bid_price = ob.top_bid_price
         top_ask_price = ob.top_ask_price
@@ -266,6 +270,9 @@ class FarmingEngine:
         # If our order is already at the right price — no action needed
         if s.current_order_price_cents == target_cents:
             return
+
+        logger.info("Session %s: bid=%d ask=%d target=%d (src=%s)",
+                     s.session_id, top_bid_cents, top_ask_cents, target_cents, source)
 
         # If top bid moved down TO our price, we need to move further
         if s.side == Side.BUY and s.current_order_price_cents is not None:
