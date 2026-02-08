@@ -65,6 +65,7 @@ class FarmingSession:
     placed_count: int = 0
     cancelled_count: int = 0
     last_placed_shares: int = 0  # last quantity (human-readable) placed
+    order_placed_at: float = 0   # time.time() when current order was placed
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -112,7 +113,8 @@ class FarmingEngine:
     def __init__(self, api: PredictAPI, api_key: str, private_key: str,
                  predict_account: str | None = None,
                  on_order_move=None,
-                 orderbook_ws=None):
+                 orderbook_ws=None,
+                 storage=None):
         self.api = api
         self.api_key = api_key
         self.private_key = private_key
@@ -123,6 +125,8 @@ class FarmingEngine:
         self.on_order_move = on_order_move
         # Optional WebSocket orderbook (used first, REST as fallback)
         self.orderbook_ws = orderbook_ws
+        # Persistent storage for sessions and metrics
+        self.storage = storage
 
         opts = None
         if predict_account:
@@ -137,6 +141,7 @@ class FarmingEngine:
         self.sessions[session.session_id] = session
         if self.orderbook_ws:
             self.orderbook_ws.subscribe(session.market_id)
+        self._persist()
         logger.info("Added farming session %s for market %s (%s)",
                      session.session_id, session.market_id, session.outcome_name)
 
@@ -147,7 +152,13 @@ class FarmingEngine:
             if self.orderbook_ws:
                 self.orderbook_ws.unsubscribe(session.market_id)
             logger.info("Removed farming session %s", session_id)
+        self._persist()
         return session
+
+    def _persist(self) -> None:
+        """Save current sessions to disk."""
+        if self.storage:
+            self.storage.save_sessions(self.sessions)
 
     async def get_balance_usdt(self) -> float:
         """Get available USDT balance (human-readable)."""
@@ -189,6 +200,57 @@ class FarmingEngine:
         self.api.client.headers["Authorization"] = f"Bearer {jwt_token}"
         logger.info("JWT authentication successful for %s", signer[:10] + "...")
 
+    async def restore_sessions(self, saved: list[dict]) -> int:
+        """Restore sessions from persistent storage. Returns count restored."""
+        now = datetime.now(timezone.utc)
+        count = 0
+        for d in saved:
+            # Skip expired sessions
+            stop_at = None
+            if d.get("stop_at"):
+                stop_at = datetime.fromisoformat(d["stop_at"])
+                if stop_at <= now:
+                    logger.info("Skipping expired session %s", d["session_id"])
+                    continue
+
+            session = FarmingSession(
+                session_id=d["session_id"],
+                market_id=d["market_id"],
+                market_title=d.get("market_title", ""),
+                token_id=d["token_id"],
+                outcome_name=d.get("outcome_name", ""),
+                side=d.get("side", 0),
+                shares_wei=d.get("shares_wei", 0),
+                max_spread_cents=d.get("max_spread_cents", 3),
+                depth_cents=d.get("depth_cents", 1),
+                stop_at=stop_at,
+                is_neg_risk=d.get("is_neg_risk", False),
+                is_yield_bearing=d.get("is_yield_bearing", False),
+                fee_rate_bps=d.get("fee_rate_bps", 0),
+                invert_book=d.get("invert_book", False),
+                notify_moves=d.get("notify_moves", False),
+                chat_id=d.get("chat_id", 0),
+            )
+
+            # Cancel orphaned order from before restart
+            old_id = d.get("current_order_id")
+            if old_id:
+                try:
+                    resp = await self.api.client.post(
+                        "/v1/orders/remove",
+                        json={"data": {"ids": [old_id]}},
+                    )
+                    logger.info("Cancelled orphaned order %s for session %s (status %s)",
+                                old_id, session.session_id, resp.status_code)
+                except Exception as e:
+                    logger.warning("Failed to cancel orphaned order %s: %s", old_id, e)
+
+            self.add_session(session)
+            count += 1
+
+        logger.info("Restored %d farming sessions", count)
+        return count
+
     def start(self) -> None:
         if self._poll_task is None or self._poll_task.done():
             self._poll_task = asyncio.create_task(self._poll_loop())
@@ -207,12 +269,29 @@ class FarmingEngine:
                     session.error = str(e)
                     logger.error("Tick error for session %s: %s", sid, e)
 
+    def _record_completed_order(self, s: FarmingSession) -> None:
+        """Record the current in-flight order to metrics before cancel."""
+        if (self.storage and s.current_order_price_cents is not None
+                and s.order_placed_at > 0 and s.last_placed_shares > 0):
+            self.storage.record_order(
+                session_id=s.session_id,
+                market_title=s.market_title,
+                outcome_name=s.outcome_name,
+                placed_at=s.order_placed_at,
+                cancelled_at=time.time(),
+                price_cents=s.current_order_price_cents,
+                shares=s.last_placed_shares,
+                depth_cents=s.depth_cents,
+            )
+
     async def _tick(self, s: FarmingSession) -> None:
         # Check deadline
         if s.is_expired:
             logger.info("Session %s expired (cutoff reached), cancelling order", s.session_id)
+            self._record_completed_order(s)
             await self._cancel_current_order(s)
             s.active = False
+            self._persist()
             return
 
         # Get orderbook: try WebSocket cache first, fall back to REST
@@ -280,8 +359,9 @@ class FarmingEngine:
                 logger.info("Session %s: top bid dropped to our level (%d¢), moving to %d¢",
                             s.session_id, top_bid_cents, target_cents)
 
-        # Cancel existing order and place new one
+        # Record the old order's metrics before cancelling
         old_price = s.current_order_price_cents
+        self._record_completed_order(s)
         await self._cancel_current_order(s)
         # Re-check active flag: session may have been stopped while we were awaiting
         if not s.active:
@@ -419,7 +499,9 @@ class FarmingEngine:
 
             s.current_order_price_cents = price_cents
             s.last_placed_shares = quantity_wei // WEI
+            s.order_placed_at = time.time()
             s.placed_count += 1
+            self._persist()
 
             logger.info("Session %s: placed %s order at %d¢ (id: %s, hash: %s)",
                          s.session_id, "BUY" if s.side == 0 else "SELL",
@@ -465,9 +547,11 @@ class FarmingEngine:
             s.current_order_id = None
             s.current_order_hash = None
             s.current_order_price_cents = None
+            s.order_placed_at = 0
 
     async def cancel_all_for_session(self, session_id: str) -> None:
         s = self.sessions.get(session_id)
         if s:
+            self._record_completed_order(s)
             await self._cancel_current_order(s)
             s.active = False

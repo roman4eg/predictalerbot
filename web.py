@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from predict_api import PredictAPI, invert_orderbook
 from predict_bot import FarmingEngine, FarmingSession, WEI
 from orderbook_ws import OrderBookWS
+from storage import Storage
 
 load_dotenv()
 
@@ -50,6 +51,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 api: PredictAPI | None = None
 ob_ws: OrderBookWS | None = None
+storage: Storage | None = None
 engine: FarmingEngine | None = None
 
 app = FastAPI(title="Predict.fun Farming Bot")
@@ -57,8 +59,9 @@ app = FastAPI(title="Predict.fun Farming Bot")
 
 @app.on_event("startup")
 async def startup():
-    global api, ob_ws, engine
+    global api, ob_ws, storage, engine
     api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
+    storage = Storage()
     if PROXY_URL:
         logger.info("Using proxy: %s", PROXY_URL.split("@")[-1])
 
@@ -69,8 +72,14 @@ async def startup():
         api, PREDICT_API_KEY, PRIVATE_KEY,
         predict_account=PREDICT_ACCOUNT or None,
         orderbook_ws=ob_ws,
+        storage=storage,
     )
     await engine.authenticate()
+    # Restore sessions from persistent storage
+    saved = storage.load_sessions()
+    if saved:
+        count = await engine.restore_sessions(saved)
+        logger.info("Restored %d sessions from storage", count)
     engine.start()
     logger.info("Farming web UI started")
 

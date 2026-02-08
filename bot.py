@@ -19,6 +19,7 @@ from telegram.ext import (
 
 from predict_api import OrderBook, Outcome, Position, PredictAPI, invert_orderbook
 from orderbook_ws import OrderBookWS
+from storage import Storage, get_predict_week_start
 
 load_dotenv()
 
@@ -92,6 +93,7 @@ pending_selections: dict[int, tuple[str, str, list[Outcome]]] = {}
 
 api: PredictAPI | None = None
 ob_ws: OrderBookWS | None = None  # shared WebSocket orderbook client
+storage: Storage | None = None    # persistent storage for sessions and metrics
 engine = None  # FarmingEngine | None — initialized in post_init if PRIVATE_KEY is set
 
 # Pending farming flow state: chat_id -> {slug, title, outcomes, cat_data}
@@ -367,6 +369,12 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         err_str = f"\n  ❗ {s.error}" if s.error else ""
         shares_str = "MAX" if s.shares_wei == 0 else f"{s.shares_wei / (10**18):.0f}"
 
+        # Current liquidity in USD
+        liq = s.last_placed_shares * s.current_order_price_cents / 100 if (
+            s.last_placed_shares and s.current_order_price_cents
+        ) else 0
+        liq_str = f"${liq:.2f}" if liq else "—"
+
         # Time remaining
         if s.stop_at:
             time_str = f"⏱ Залишилось: *{_fmt_remaining(s.stop_at)}*"
@@ -376,7 +384,7 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         lines.append(
             f"🏷 `{s.session_id}` | *{s.outcome_name}*\n"
             f"  {status} | 📈 Ордер: {price_str} | Бід/Аск: {bid_str}/{ask_str}\n"
-            f"  🎲 Шейрсів: {shares_str} | 📏 Глибина: {s.depth_cents}ц\n"
+            f"  💵 Ліквідність: *{liq_str}* | 📏 Глибина: {s.depth_cents}ц\n"
             f"  {time_str}{err_str}"
         )
         if s.active:
@@ -419,6 +427,64 @@ async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(f"💰 Баланс: *{balance:.2f} USDT*", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Помилка отримання балансу: {e}")
+
+
+def _fmt_duration(sec: float) -> str:
+    """Format seconds as human-readable duration."""
+    if sec < 60:
+        return f"{sec:.0f}с"
+    if sec < 3600:
+        return f"{sec / 60:.1f}хв"
+    return f"{sec / 3600:.1f}год"
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show farming stats for current and previous predict.fun weeks."""
+    if storage is None:
+        await update.message.reply_text("⚠️ Фармінг не налаштовано.")
+        return
+
+    from datetime import timedelta
+
+    lines = ["📊 *Статистика фармінгу*\n"]
+
+    # Current liquidity
+    if engine and engine.sessions:
+        current_liq = storage.get_current_liquidity_usd(engine.sessions)
+        active_count = sum(1 for s in engine.sessions.values() if s.active)
+        lines.append(f"💰 Зараз у стакані: *${current_liq:.2f}* ({active_count} сесій)\n")
+
+    # Current week
+    week_start = get_predict_week_start()
+    _append_week_stats(lines, storage, week_start, "Поточний тиждень")
+
+    # Previous week
+    prev_start = week_start - timedelta(weeks=1)
+    _append_week_stats(lines, storage, prev_start, "Минулий тиждень")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+def _append_week_stats(lines: list, stor: Storage, week_start, label: str) -> None:
+    """Append formatted weekly stats to lines list."""
+    ws = stor.get_weekly_stats(week_start)
+    date_from = ws.week_start.strftime("%d.%m %H:%M")
+    date_to = ws.week_end.strftime("%d.%m %H:%M")
+
+    lines.append(f"📅 *{label}* ({date_from} → {date_to} UTC)")
+
+    if ws.total_orders == 0:
+        lines.append("   _Немає даних_\n")
+        return
+
+    lines.append(f"├ 📋 Ордерів: *{ws.total_orders}*")
+    lines.append(f"├ 💵 Сер. ліквідність: *${ws.avg_liquidity_usd:.2f}*")
+    lines.append(f"├ ⏱ Сер. час ордера: *{_fmt_duration(ws.avg_lifetime_sec)}*")
+    lines.append(f"├ 📏 Сер. глибина: *{ws.avg_depth_cents:.1f}ц*")
+    lines.append(f"├ 💰 Ліквідність×час: *{ws.liquidity_hours:,.2f} $·год*")
+    if ws.markets:
+        lines.append(f"└ 🏟 Маркети: {', '.join(ws.markets)}")
+    lines.append("")
 
 
 async def _handle_farm_outcome(query) -> None:
@@ -1065,9 +1131,10 @@ async def _on_order_move(session, old_price_cents, new_price_cents, shares) -> N
 
 
 async def post_init(app: Application) -> None:
-    global api, ob_ws, engine, _tg_app
+    global api, ob_ws, storage, engine, _tg_app
     _tg_app = app
     api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
+    storage = Storage()
 
     # Start shared WebSocket orderbook client
     ob_ws = OrderBookWS(PREDICT_API_KEY)
@@ -1084,9 +1151,15 @@ async def post_init(app: Application) -> None:
             predict_account=PREDICT_ACCOUNT or None,
             on_order_move=_on_order_move,
             orderbook_ws=ob_ws,
+            storage=storage,
         )
         try:
             await engine.authenticate()
+            # Restore sessions from persistent storage
+            saved = storage.load_sessions()
+            if saved:
+                count = await engine.restore_sessions(saved)
+                logger.info("Restored %d sessions from storage", count)
             engine.start()
             logger.info("Farming engine initialized in Telegram bot")
         except Exception as e:
@@ -1119,6 +1192,7 @@ def main() -> None:
     app.add_handler(CommandHandler("sessions", cmd_sessions))
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("balance", cmd_balance))
+    app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
