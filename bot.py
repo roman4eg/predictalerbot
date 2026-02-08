@@ -100,6 +100,10 @@ pending_farm_shares: dict[int, dict] = {}
 pending_farm_depth: dict[int, dict] = {}
 # Pending stop_at input: chat_id -> config dict (after depth chosen)
 pending_farm_stop: dict[int, dict] = {}
+# Pending notify input: chat_id -> config dict (after stop chosen)
+pending_farm_notify: dict[int, dict] = {}
+# Telegram app reference for sending notifications from engine callback
+_tg_app: Application | None = None
 
 
 def parse_slug(url: str) -> str | None:
@@ -521,6 +525,32 @@ def _show_stop_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(buttons)
 
 
+def _show_notify_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Build message + buttons for notification toggle step."""
+    stop_str = config["stop_at"].strftime("%Y-%m-%d %H:%M UTC") if config.get("stop_at") else "без обмеження"
+    text = (
+        f"🎯 *{config['title']}* → *{config['outcome'].name}*\n"
+        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц*\n"
+        f"⏱ Зупинка: *{stop_str}*\n\n"
+        f"🔔 Надсилати сповіщення при перестановці ордерів?"
+    )
+    buttons = [
+        [InlineKeyboardButton("🔔 Так, сповіщувати", callback_data="farm_notify:yes")],
+        [InlineKeyboardButton("🔕 Ні, без сповіщень", callback_data="farm_notify:no")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def _advance_to_notify(chat_id: int, config: dict, query=None, message=None) -> None:
+    """Move to notification toggle step."""
+    pending_farm_notify[chat_id] = config
+    text, markup = _show_notify_buttons(config)
+    if query:
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+    elif message:
+        await message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
+
+
 async def _create_farm_session(chat_id: int, config: dict) -> str:
     """Create a FarmingSession from the config dict. Returns message text."""
     from predict_bot import FarmingSession, WEI
@@ -531,6 +561,7 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
     shares_wei = config.get("shares_wei", 0)
     depth_cents = config.get("depth_cents", 1)
     stop_at = config.get("stop_at")
+    notify_moves = config.get("notify_moves", False)
 
     session = FarmingSession(
         session_id=str(uuid.uuid4())[:8],
@@ -547,12 +578,15 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
         is_yield_bearing=cat_data.get("isYieldBearing", False),
         fee_rate_bps=market.get("feeRateBps", 0),
         invert_book=outcome.invert_book,
+        notify_moves=notify_moves,
+        chat_id=chat_id,
     )
 
     engine.add_session(session)
 
     shares_str = config.get("shares_str", str(shares_wei))
     stop_str = stop_at.strftime("%Y-%m-%d %H:%M UTC") if stop_at else "без обмеження"
+    notify_str = "🔔 увімкнено" if notify_moves else "🔕 вимкнено"
     return (
         f"✅ *Фармінг-сесію створено!*\n\n"
         f"🏷 ID: `{session.session_id}`\n"
@@ -560,7 +594,8 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
         f"🎯 Outcome: *{outcome.name}*\n"
         f"🎲 Шейрсів: *{shares_str}*\n"
         f"📏 Глибина: *{depth_cents}ц* | Спред: *3ц*\n"
-        f"⏱ Зупинка: *{stop_str}*\n\n"
+        f"⏱ Зупинка: *{stop_str}*\n"
+        f"📨 Сповіщення: *{notify_str}*\n\n"
         f"🤖 Бот почне працювати протягом кількох секунд.\n"
         f"📋 Перевірити: /sessions\n"
         f"🛑 Зупинити: /stop {session.session_id}"
@@ -631,7 +666,7 @@ async def _handle_farm_depth(query) -> None:
 
 
 async def _handle_farm_nostop(query) -> None:
-    """User chose no stop time."""
+    """User chose no stop time — advance to notify step."""
     chat_id = query.message.chat_id
     config = pending_farm_stop.pop(chat_id, None)
     if not config:
@@ -639,8 +674,7 @@ async def _handle_farm_nostop(query) -> None:
         return
 
     config["stop_at"] = None
-    text = await _create_farm_session(chat_id, config)
-    await query.edit_message_text(text, parse_mode="Markdown")
+    await _advance_to_notify(chat_id, config, query=query)
 
 
 async def _handle_farm_setstop(query) -> None:
@@ -655,6 +689,21 @@ async def _handle_farm_setstop(query) -> None:
         "⏱ Введіть час зупинки (UTC).\nФормат: `YYYY-MM-DD HH:MM`\nНаприклад: `2026-02-08 15:30`",
         parse_mode="Markdown",
     )
+
+
+async def _handle_farm_notify(query) -> None:
+    """User chose notification preference."""
+    chat_id = query.message.chat_id
+    val = query.data.split(":")[1]
+
+    config = pending_farm_notify.pop(chat_id, None)
+    if not config:
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    config["notify_moves"] = val == "yes"
+    text = await _create_farm_session(chat_id, config)
+    await query.edit_message_text(text, parse_mode="Markdown")
 
 
 async def _handle_farm_stop(query) -> None:
@@ -730,8 +779,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         pending_farm_stop.pop(chat_id, None)
         config["stop_at"] = stop_at
-        msg = await _create_farm_session(chat_id, config)
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await _advance_to_notify(chat_id, config, message=update.message)
         return
 
 
@@ -758,6 +806,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_farm_nostop(query)
     elif data == "farm_setstop":
         await _handle_farm_setstop(query)
+    elif data.startswith("farm_notify:"):
+        await _handle_farm_notify(query)
     elif data.startswith("farm_stop:"):
         await _handle_farm_stop(query)
 
@@ -973,8 +1023,35 @@ async def poll_wallets(app: Application) -> None:
                     logger.error("Failed to send wallet notification to chat %s: %s", w.chat_id, e)
 
 
+async def _on_order_move(session, old_price_cents, new_price_cents, shares) -> None:
+    """Callback from FarmingEngine when an order is moved."""
+    if not _tg_app or not session.chat_id:
+        return
+    if old_price_cents is not None:
+        arrow = "📈" if new_price_cents > old_price_cents else "📉"
+        old_str = f"{old_price_cents}ц"
+    else:
+        arrow = "🆕"
+        old_str = "—"
+    try:
+        await _tg_app.bot.send_message(
+            chat_id=session.chat_id,
+            text=(
+                f"{arrow} *Перестановка ордеру*\n\n"
+                f"🏷 `{session.session_id}` | *{session.outcome_name}*\n"
+                f"💵 Було: *{old_str}* → Стало: *{new_price_cents}ц*\n"
+                f"🎲 Шейрсів: *{shares}*\n"
+                f"📊 Бід/Аск: {session.last_top_bid}/{session.last_top_ask}"
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        logger.warning("Failed to send order move notification: %s", e)
+
+
 async def post_init(app: Application) -> None:
-    global api, engine
+    global api, engine, _tg_app
+    _tg_app = app
     api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
     asyncio.create_task(poll_orderbooks(app))
     asyncio.create_task(poll_wallets(app))
@@ -985,6 +1062,7 @@ async def post_init(app: Application) -> None:
         engine = FarmingEngine(
             api, PREDICT_API_KEY, PRIVATE_KEY,
             predict_account=PREDICT_ACCOUNT or None,
+            on_order_move=_on_order_move,
         )
         try:
             await engine.authenticate()

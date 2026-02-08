@@ -51,6 +51,8 @@ class FarmingSession:
     is_yield_bearing: bool
     fee_rate_bps: int
     invert_book: bool = False  # invert orderbook for secondary outcome in binary markets
+    notify_moves: bool = False  # send Telegram notification on order moves
+    chat_id: int = 0  # Telegram chat_id for notifications
 
     # Runtime state
     active: bool = True
@@ -62,6 +64,7 @@ class FarmingSession:
     error: str | None = None
     placed_count: int = 0
     cancelled_count: int = 0
+    last_placed_shares: int = 0  # last quantity (human-readable) placed
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -107,13 +110,16 @@ class FarmingEngine:
     """Manages farming sessions — places/moves orders based on orderbook."""
 
     def __init__(self, api: PredictAPI, api_key: str, private_key: str,
-                 predict_account: str | None = None):
+                 predict_account: str | None = None,
+                 on_order_move=None):
         self.api = api
         self.api_key = api_key
         self.private_key = private_key
         self.predict_account = predict_account
         self.sessions: dict[str, FarmingSession] = {}
         self._poll_task: asyncio.Task | None = None
+        # Async callback: on_order_move(session, old_price_cents, new_price_cents, shares)
+        self.on_order_move = on_order_move
 
         opts = None
         if predict_account:
@@ -255,11 +261,20 @@ class FarmingEngine:
                             s.session_id, top_bid_cents, target_cents)
 
         # Cancel existing order and place new one
+        old_price = s.current_order_price_cents
         await self._cancel_current_order(s)
         # Re-check active flag: session may have been stopped while we were awaiting
         if not s.active:
             return
         await self._place_order(s, target_cents)
+
+        # Notify about order move (if enabled and order was actually placed)
+        if (s.notify_moves and s.current_order_price_cents is not None
+                and self.on_order_move):
+            try:
+                await self.on_order_move(s, old_price, target_cents, s.last_placed_shares)
+            except Exception as e:
+                logger.warning("Order move notification failed: %s", e)
 
     async def _place_order(self, s: FarmingSession, price_cents: int) -> None:
         if not s.active:
@@ -355,6 +370,7 @@ class FarmingEngine:
             s.current_order_id = None
 
         s.current_order_price_cents = price_cents
+        s.last_placed_shares = quantity_wei // WEI
         s.placed_count += 1
 
         logger.info("Session %s: placed %s order at %d¢ (id: %s, hash: %s)",
