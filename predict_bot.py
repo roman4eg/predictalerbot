@@ -266,24 +266,23 @@ class FarmingEngine:
             return
         price_wei = _cents_to_wei(price_cents)
 
-        # Recalculate shares from balance if use_max (shares_wei == 0)
-        quantity_wei = s.shares_wei
-        if quantity_wei == 0:
-            try:
-                balance_wei = await self.builder.balance_of_async("USDT")
-                # cost per share = price_wei / WEI in USDT terms
-                # max_shares = balance / price_per_share
-                if price_wei > 0:
-                    quantity_wei = (balance_wei * WEI) // price_wei
-                if quantity_wei <= 0:
-                    s.error = "Insufficient balance"
-                    return
-                logger.info("Session %s: calculated %d shares from balance (price %d¢)",
-                            s.session_id, quantity_wei // WEI, price_cents)
-            except Exception as e:
-                s.error = f"Balance check failed: {e}"
-                logger.warning("Session %s: balance check failed: %s", s.session_id, e)
+        # Always recalculate shares from balance at the current price.
+        # If price moves up — fewer shares; if down — more shares.
+        try:
+            balance_wei = await self.builder.balance_of_async("USDT")
+            if price_wei > 0:
+                quantity_wei = (balance_wei * WEI) // price_wei
+            else:
+                quantity_wei = 0
+            if quantity_wei <= 0:
+                s.error = "Insufficient balance"
                 return
+            logger.info("Session %s: calculated %d shares from balance (price %d¢)",
+                        s.session_id, quantity_wei // WEI, price_cents)
+        except Exception as e:
+            s.error = f"Balance check failed: {e}"
+            logger.warning("Session %s: balance check failed: %s", s.session_id, e)
+            return
 
         amounts = self.builder.get_limit_order_amounts(
             LimitHelperInput(

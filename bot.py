@@ -107,50 +107,63 @@ def parse_slug(url: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _fmt_remaining(stop_at: datetime) -> str:
+    """Format time remaining until stop_at as human-readable string."""
+    delta = stop_at - datetime.now(timezone.utc)
+    if delta.total_seconds() <= 0:
+        return "завершено"
+    total_sec = int(delta.total_seconds())
+    hours, remainder = divmod(total_sec, 3600)
+    minutes, _ = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}г {minutes}хв"
+    return f"{minutes}хв"
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "Predict.fun — Трекер стакану та позицій\n\n"
-        "Команди:\n"
-        "/look <URL> — підписатись на оновлення стакану\n"
-        "/subs — список активних підписок\n\n"
-        "/watch <адреса> [назва] — стежити за позиціями гаманця\n"
-        "/wallets — список гаманців під стеженням\n"
+        "🔮 *Predict.fun* — Трекер стакану та позицій\n\n"
+        "📋 *Команди:*\n"
+        "📊 /look <URL> — підписатись на оновлення стакану\n"
+        "📑 /subs — список активних підписок\n\n"
+        "👁 /watch <адреса> [назва] — стежити за позиціями гаманця\n"
+        "💼 /wallets — список гаманців під стеженням\n"
     )
     if engine is not None:
         text += (
-            "\nФармінг:\n"
-            "/farm <URL> — створити фармінг-сесію\n"
-            "/sessions — активні фармінг-сесії\n"
-            "/stop <id> — зупинити сесію\n"
-            "/balance — баланс USDT\n"
+            "\n🤖 *Фармінг:*\n"
+            "🚀 /farm <URL> — створити фармінг-сесію\n"
+            "📋 /sessions — активні фармінг-сесії\n"
+            "🛑 /stop <id> — зупинити сесію\n"
+            "💰 /balance — баланс USDT\n"
         )
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
 async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Використання: /look <посилання на подію predict.fun>")
+        await update.message.reply_text("ℹ️ Використання: /look <посилання на подію predict.fun>")
         return
 
     url = context.args[0]
     slug = parse_slug(url)
     if not slug:
         await update.message.reply_text(
-            "Невірне посилання. Очікуваний формат: https://predict.fun/market/<slug>"
+            "❌ Невірне посилання. Очікуваний формат: https://predict.fun/market/<slug>"
         )
         return
 
-    await update.message.reply_text(f"Завантажую подію: {slug} ...")
+    await update.message.reply_text(f"⏳ Завантажую подію: {slug} ...")
 
     try:
         title, outcomes, _ = await api.get_outcomes_from_slug(slug)
     except Exception as e:
         logger.error("Failed to fetch category %s: %s", slug, e)
-        await update.message.reply_text(f"Помилка завантаження події: {e}")
+        await update.message.reply_text(f"❌ Помилка завантаження події: {e}")
         return
 
     if not outcomes:
-        await update.message.reply_text("Не знайдено outcomes для цієї події.")
+        await update.message.reply_text("🤷 Не знайдено outcomes для цієї події.")
         return
 
     pending_selections[update.effective_chat.id] = (slug, title, outcomes)
@@ -158,11 +171,11 @@ async def cmd_look(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     buttons = []
     for i, o in enumerate(outcomes):
         buttons.append(
-            [InlineKeyboardButton(o.name, callback_data=f"select_outcome:{i}")]
+            [InlineKeyboardButton(f"🎯 {o.name}", callback_data=f"select_outcome:{i}")]
         )
 
     await update.message.reply_text(
-        f"*{title}*\n\nДоступні outcomes:",
+        f"📊 *{title}*\n\nОберіть outcome:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
@@ -173,33 +186,34 @@ async def cmd_subs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_subs = {k: v for k, v in subscriptions.items() if k[0] == chat_id}
 
     if not user_subs:
-        await update.message.reply_text("Немає активних підписок.")
+        await update.message.reply_text("📭 Немає активних підписок.")
         return
 
     lines = []
     buttons = []
     for i, ((_, market_id, outcome_name), sub) in enumerate(user_subs.items()):
         price_str = f"{sub.last_notified_price}" if sub.last_notified_price is not None else "—"
-        lines.append(f"{i + 1}. {sub.category_title} → {outcome_name} (найкраща ставка: {price_str})")
+        lines.append(f"{i + 1}. 📊 {sub.category_title} → {outcome_name} (бід: {price_str})")
         buttons.append(
             [
                 InlineKeyboardButton(
-                    f"Відписатись: {outcome_name}",
+                    f"❌ Відписатись: {outcome_name}",
                     callback_data=f"unsub:{market_id}:{outcome_name}",
                 )
             ]
         )
 
     await update.message.reply_text(
-        "Активні підписки:\n\n" + "\n".join(lines),
+        "📑 *Активні підписки:*\n\n" + "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown",
     )
 
 
 async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text(
-            "Використання: /watch <адреса гаманця> [назва]\n"
+            "ℹ️ Використання: /watch <адреса гаманця> [назва]\n"
             "Приклад: /watch 0x77F3...aEE4 mywallet"
         )
         return
@@ -210,16 +224,16 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     key = (chat_id, address)
 
     if key in wallet_watches:
-        await update.message.reply_text("Ви вже стежите за цим гаманцем.")
+        await update.message.reply_text("⚠️ Ви вже стежите за цим гаманцем.")
         return
 
-    await update.message.reply_text(f"Завантажую поточні позиції: `{address}` ...", parse_mode="Markdown")
+    await update.message.reply_text(f"⏳ Завантажую поточні позиції: `{address}` ...", parse_mode="Markdown")
 
     try:
         positions = await api.get_positions_by_address(address)
     except Exception as e:
         logger.error("Failed to fetch positions for %s: %s", address, e)
-        await update.message.reply_text(f"Помилка завантаження позицій: {e}")
+        await update.message.reply_text(f"❌ Помилка завантаження позицій: {e}")
         return
 
     known_uids = {p.uid for p in positions}
@@ -232,24 +246,24 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     wallet_watches[key] = w
 
     unwatch_btn = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Припинити стеження", callback_data=f"unwatch:{address}")]]
+        [[InlineKeyboardButton("🚫 Припинити стеження", callback_data=f"unwatch:{address}")]]
     )
 
     if positions:
         lines = []
         for p in positions:
             lines.append(
-                f"  • {p.market_title} → {p.outcome_name}\n"
-                f"    Шейрсів: {p.size:.2f} | Ціна: {p.avg_price:.4f} | ${p.value_usd:.2f}"
+                f"  📌 {p.market_title} → {p.outcome_name}\n"
+                f"    🎲 {p.size:.2f} шейрсів | 💵 {p.avg_price:.4f} | ${p.value_usd:.2f}"
             )
         pos_text = "\n".join(lines)
     else:
         pos_text = "  Позицій поки немає."
 
     await update.message.reply_text(
-        f"Стеження за гаманцем *{w.display_name}* увімкнено\n\n"
-        f"Поточні позиції ({len(positions)}):\n{pos_text}\n\n"
-        f"Ви отримаєте сповіщення при появі нових позицій.",
+        f"👁 Стеження за гаманцем *{w.display_name}* увімкнено\n\n"
+        f"📊 Поточні позиції ({len(positions)}):\n{pos_text}\n\n"
+        f"🔔 Ви отримаєте сповіщення при появі нових позицій.",
         reply_markup=unwatch_btn,
         parse_mode="Markdown",
     )
@@ -260,19 +274,19 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_watches = {k: v for k, v in wallet_watches.items() if k[0] == chat_id}
 
     if not user_watches:
-        await update.message.reply_text("Немає гаманців під стеженням.")
+        await update.message.reply_text("📭 Немає гаманців під стеженням.")
         return
 
     lines = []
     buttons = []
     for i, ((_, addr), w) in enumerate(user_watches.items()):
-        lines.append(f"{i + 1}. *{w.display_name}* — {len(w.known_position_uids)} позицій")
+        lines.append(f"{i + 1}. 👁 *{w.display_name}* — {len(w.known_position_uids)} позицій")
         buttons.append(
-            [InlineKeyboardButton(f"Припинити: {w.display_name}", callback_data=f"unwatch:{addr}")]
+            [InlineKeyboardButton(f"🚫 Припинити: {w.display_name}", callback_data=f"unwatch:{addr}")]
         )
 
     await update.message.reply_text(
-        "Гаманці під стеженням:\n\n" + "\n".join(lines),
+        "💼 *Гаманці під стеженням:*\n\n" + "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
@@ -282,28 +296,28 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if engine is None:
-        await update.message.reply_text("Фармінг не налаштовано. Додайте WALLET_PRIVATE_KEY в .env")
+        await update.message.reply_text("⚠️ Фармінг не налаштовано. Додайте WALLET_PRIVATE_KEY в .env")
         return
     if not context.args:
-        await update.message.reply_text("Використання: /farm <посилання на подію predict.fun>")
+        await update.message.reply_text("ℹ️ Використання: /farm <посилання на подію predict.fun>")
         return
 
     url = context.args[0]
     slug = parse_slug(url)
     if not slug:
-        await update.message.reply_text("Невірне посилання.")
+        await update.message.reply_text("❌ Невірне посилання.")
         return
 
-    await update.message.reply_text(f"Завантажую подію: {slug} ...")
+    await update.message.reply_text(f"⏳ Завантажую подію: {slug} ...")
 
     try:
         title, outcomes, cat_data = await api.get_outcomes_from_slug(slug)
     except Exception as e:
-        await update.message.reply_text(f"Помилка: {e}")
+        await update.message.reply_text(f"❌ Помилка: {e}")
         return
 
     if not outcomes:
-        await update.message.reply_text("Не знайдено outcomes.")
+        await update.message.reply_text("🤷 Не знайдено outcomes.")
         return
 
     markets = cat_data.get("markets", [])
@@ -314,10 +328,10 @@ async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     buttons = []
     for i, o in enumerate(outcomes):
-        buttons.append([InlineKeyboardButton(o.name, callback_data=f"farm_outcome:{i}")])
+        buttons.append([InlineKeyboardButton(f"🎯 {o.name}", callback_data=f"farm_outcome:{i}")])
 
     await update.message.reply_text(
-        f"*{title}*\n\nОберіть outcome для фармінгу:",
+        f"🚀 *{title}*\n\nОберіть outcome для фармінгу:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
@@ -325,33 +339,46 @@ async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if engine is None:
-        await update.message.reply_text("Фармінг не налаштовано.")
+        await update.message.reply_text("⚠️ Фармінг не налаштовано.")
         return
 
     if not engine.sessions:
-        await update.message.reply_text("Немає активних фармінг-сесій.")
+        await update.message.reply_text("📭 Немає активних фармінг-сесій.")
         return
 
     lines = []
     buttons = []
     for s in engine.sessions.values():
-        status = "Активна" if s.active and not s.is_expired else ("Дедлайн" if s.is_expired else "Зупинено")
+        if s.active and not s.is_expired:
+            status = "🟢 Активна"
+        elif s.is_expired:
+            status = "🔴 Дедлайн"
+        else:
+            status = "⏸ Зупинено"
         price_str = f"{s.current_order_price_cents}ц" if s.current_order_price_cents else "—"
         bid_str = f"{s.last_top_bid}" if s.last_top_bid else "—"
         ask_str = f"{s.last_top_ask}" if s.last_top_ask else "—"
-        err_str = f"\n  Помилка: {s.error}" if s.error else ""
+        err_str = f"\n  ❗ {s.error}" if s.error else ""
         shares_str = "MAX" if s.shares_wei == 0 else f"{s.shares_wei / (10**18):.0f}"
+
+        # Time remaining
+        if s.stop_at:
+            time_str = f"⏱ Залишилось: *{_fmt_remaining(s.stop_at)}*"
+        else:
+            time_str = "⏱ Без обмеження часу"
+
         lines.append(
-            f"`{s.session_id}` | {s.outcome_name}\n"
-            f"  {status} | Ордер: {price_str} | Бід/Аск: {bid_str}/{ask_str}\n"
-            f"  Шейрсів: {shares_str} | Глибина: {s.depth_cents}ц{err_str}"
+            f"🏷 `{s.session_id}` | *{s.outcome_name}*\n"
+            f"  {status} | 📈 Ордер: {price_str} | Бід/Аск: {bid_str}/{ask_str}\n"
+            f"  🎲 Шейрсів: {shares_str} | 📏 Глибина: {s.depth_cents}ц\n"
+            f"  {time_str}{err_str}"
         )
         if s.active:
             buttons.append([InlineKeyboardButton(
-                f"Зупинити {s.session_id}", callback_data=f"farm_stop:{s.session_id}"
+                f"🛑 Зупинити {s.session_id}", callback_data=f"farm_stop:{s.session_id}"
             )])
 
-    text = "Фармінг-сесії:\n\n" + "\n\n".join(lines)
+    text = "📋 *Фармінг-сесії:*\n\n" + "\n\n".join(lines)
     await update.message.reply_text(
         text,
         reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
@@ -361,31 +388,31 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if engine is None:
-        await update.message.reply_text("Фармінг не налаштовано.")
+        await update.message.reply_text("⚠️ Фармінг не налаштовано.")
         return
     if not context.args:
-        await update.message.reply_text("Використання: /stop <session_id>")
+        await update.message.reply_text("ℹ️ Використання: /stop <session\\_id>")
         return
 
     sid = context.args[0]
     if sid not in engine.sessions:
-        await update.message.reply_text(f"Сесію `{sid}` не знайдено.", parse_mode="Markdown")
+        await update.message.reply_text(f"🤷 Сесію `{sid}` не знайдено.", parse_mode="Markdown")
         return
 
     await engine.cancel_all_for_session(sid)
     engine.remove_session(sid)
-    await update.message.reply_text(f"Сесію `{sid}` зупинено, ордер скасовано.", parse_mode="Markdown")
+    await update.message.reply_text(f"🛑 Сесію `{sid}` зупинено, ордер скасовано.", parse_mode="Markdown")
 
 
 async def cmd_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if engine is None:
-        await update.message.reply_text("Фармінг не налаштовано.")
+        await update.message.reply_text("⚠️ Фармінг не налаштовано.")
         return
     try:
         balance = await engine.get_balance_usdt()
-        await update.message.reply_text(f"Баланс: *{balance:.2f} USDT*", parse_mode="Markdown")
+        await update.message.reply_text(f"💰 Баланс: *{balance:.2f} USDT*", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"Помилка отримання балансу: {e}")
+        await update.message.reply_text(f"❌ Помилка отримання балансу: {e}")
 
 
 async def _handle_farm_outcome(query) -> None:
@@ -395,12 +422,12 @@ async def _handle_farm_outcome(query) -> None:
 
     farm_data = pending_farm.pop(chat_id, None)
     if not farm_data:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
     outcomes = farm_data["outcomes"]
     if idx >= len(outcomes):
-        await query.edit_message_text("Невірний вибір.")
+        await query.edit_message_text("❌ Невірний вибір.")
         return
 
     outcome = outcomes[idx]
@@ -412,7 +439,7 @@ async def _handle_farm_outcome(query) -> None:
     try:
         ob = await api.get_orderbook(outcome.market_id, invert=outcome.invert_book)
     except Exception as e:
-        await query.edit_message_text(f"Помилка завантаження стакану: {e}")
+        await query.edit_message_text(f"❌ Помилка завантаження стакану: {e}")
         return
 
     top_bid_cents = round(ob.top_bid_price * 100) if ob.top_bid_price else 0
@@ -444,16 +471,16 @@ async def _handle_farm_outcome(query) -> None:
     pending_farm_shares[chat_id] = config
 
     buttons = [
-        [InlineKeyboardButton(f"MAX ({max_shares} шейрсів)", callback_data="farm_max")],
-        [InlineKeyboardButton("Ввести к-сть вручну", callback_data="farm_manual")],
+        [InlineKeyboardButton(f"🔥 MAX ({max_shares} шейрсів)", callback_data="farm_max")],
+        [InlineKeyboardButton("✏️ Ввести к-сть вручну", callback_data="farm_manual")],
     ]
 
     await query.edit_message_text(
-        f"*{farm_data['title']}* → *{outcome.name}*\n\n"
-        f"Топ бід: *{top_bid_cents}ц* | Аск: *{top_ask_cents}ц*\n"
-        f"Наш ордер буде: *{target_cents}ц* (глибина 1ц)\n\n"
-        f"Баланс: *{balance:.2f} USDT*\n"
-        f"Макс шейрсів за {target_cents}ц: *{max_shares}*",
+        f"🎯 *{farm_data['title']}* → *{outcome.name}*\n\n"
+        f"📊 Топ бід: *{top_bid_cents}ц* | Аск: *{top_ask_cents}ц*\n"
+        f"📍 Наш ордер буде: *{target_cents}ц* (глибина 1ц)\n\n"
+        f"💰 Баланс: *{balance:.2f} USDT*\n"
+        f"🎲 Макс шейрсів за {target_cents}ц: *{max_shares}*",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
@@ -463,9 +490,9 @@ def _show_depth_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     """Build message + buttons for depth selection step."""
     top_bid = config["top_bid_cents"]
     text = (
-        f"*{config['title']}* → *{config['outcome'].name}*\n"
-        f"Топ бід: *{top_bid}ц*\n\n"
-        f"Оберіть глибину (центів від топ біду):"
+        f"🎯 *{config['title']}* → *{config['outcome'].name}*\n"
+        f"📊 Топ бід: *{top_bid}ц*\n\n"
+        f"📏 Оберіть глибину (центів від топ біду):"
     )
     buttons = [
         [
@@ -474,7 +501,7 @@ def _show_depth_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
             InlineKeyboardButton("3ц", callback_data="farm_depth:3"),
             InlineKeyboardButton("5ц", callback_data="farm_depth:5"),
         ],
-        [InlineKeyboardButton("Ввести вручну", callback_data="farm_depth:manual")],
+        [InlineKeyboardButton("✏️ Ввести вручну", callback_data="farm_depth:manual")],
     ]
     return text, InlineKeyboardMarkup(buttons)
 
@@ -482,14 +509,14 @@ def _show_depth_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
 def _show_stop_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     """Build message + buttons for stop-at selection step."""
     text = (
-        f"*{config['title']}* → *{config['outcome'].name}*\n"
-        f"Шейрсів: *{config['shares_str']}* | Глибина: *{config['depth_cents']}ц*\n\n"
-        f"Встановити час зупинки (UTC)?\n"
+        f"🎯 *{config['title']}* → *{config['outcome'].name}*\n"
+        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц*\n\n"
+        f"⏱ Встановити час зупинки (UTC)?\n"
         f"Формат: `YYYY-MM-DD HH:MM`"
     )
     buttons = [
-        [InlineKeyboardButton("Без обмеження часу", callback_data="farm_nostop")],
-        [InlineKeyboardButton("Ввести час зупинки", callback_data="farm_setstop")],
+        [InlineKeyboardButton("♾ Без обмеження часу", callback_data="farm_nostop")],
+        [InlineKeyboardButton("⏱ Ввести час зупинки", callback_data="farm_setstop")],
     ]
     return text, InlineKeyboardMarkup(buttons)
 
@@ -527,16 +554,16 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
     shares_str = config.get("shares_str", str(shares_wei))
     stop_str = stop_at.strftime("%Y-%m-%d %H:%M UTC") if stop_at else "без обмеження"
     return (
-        f"Фармінг-сесію створено!\n\n"
-        f"ID: `{session.session_id}`\n"
-        f"Подія: *{config['title']}*\n"
-        f"Outcome: *{outcome.name}*\n"
-        f"Шейрсів: *{shares_str}*\n"
-        f"Глибина: *{depth_cents}ц* | Спред: *3ц*\n"
-        f"Зупинка: *{stop_str}*\n\n"
-        f"Бот почне працювати протягом кількох секунд.\n"
-        f"Перевірити: /sessions\n"
-        f"Зупинити: /stop {session.session_id}"
+        f"✅ *Фармінг-сесію створено!*\n\n"
+        f"🏷 ID: `{session.session_id}`\n"
+        f"📊 Подія: *{config['title']}*\n"
+        f"🎯 Outcome: *{outcome.name}*\n"
+        f"🎲 Шейрсів: *{shares_str}*\n"
+        f"📏 Глибина: *{depth_cents}ц* | Спред: *3ц*\n"
+        f"⏱ Зупинка: *{stop_str}*\n\n"
+        f"🤖 Бот почне працювати протягом кількох секунд.\n"
+        f"📋 Перевірити: /sessions\n"
+        f"🛑 Зупинити: /stop {session.session_id}"
     )
 
 
@@ -562,11 +589,11 @@ async def _handle_farm_max(query) -> None:
     chat_id = query.message.chat_id
     config = pending_farm_shares.pop(chat_id, None)
     if not config:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
     config["shares_wei"] = 0
-    config["shares_str"] = "MAX (весь баланс)"
+    config["shares_str"] = "🔥 MAX (весь баланс)"
     await _advance_to_depth(chat_id, config, query)
 
 
@@ -575,11 +602,11 @@ async def _handle_farm_manual(query) -> None:
     chat_id = query.message.chat_id
     config = pending_farm_shares.get(chat_id)
     if not config:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
     await query.edit_message_text(
-        f"Введіть кількість шейрсів (макс: {config['max_shares']}):",
+        f"✏️ Введіть кількість шейрсів (макс: {config['max_shares']}):",
     )
 
 
@@ -590,13 +617,13 @@ async def _handle_farm_depth(query) -> None:
 
     config = pending_farm_depth.pop(chat_id, None)
     if not config:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
     if val == "manual":
         # Put back and wait for text input
         pending_farm_depth[chat_id] = config
-        await query.edit_message_text("Введіть глибину (центів від топ біду), наприклад: 2")
+        await query.edit_message_text("✏️ Введіть глибину (центів від топ біду), наприклад: 2")
         return
 
     config["depth_cents"] = int(val)
@@ -608,7 +635,7 @@ async def _handle_farm_nostop(query) -> None:
     chat_id = query.message.chat_id
     config = pending_farm_stop.pop(chat_id, None)
     if not config:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
     config["stop_at"] = None
@@ -621,11 +648,11 @@ async def _handle_farm_setstop(query) -> None:
     chat_id = query.message.chat_id
     config = pending_farm_stop.get(chat_id)
     if not config:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /farm ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
     await query.edit_message_text(
-        "Введіть час зупинки (UTC).\nФормат: `YYYY-MM-DD HH:MM`\nНаприклад: `2026-02-08 15:30`",
+        "⏱ Введіть час зупинки (UTC).\nФормат: `YYYY-MM-DD HH:MM`\nНаприклад: `2026-02-08 15:30`",
         parse_mode="Markdown",
     )
 
@@ -634,13 +661,13 @@ async def _handle_farm_stop(query) -> None:
     """User clicked stop session button."""
     sid = query.data.split(":")[1]
     if sid not in engine.sessions:
-        await query.edit_message_text(f"Сесію `{sid}` не знайдено.", parse_mode="Markdown")
+        await query.edit_message_text(f"🤷 Сесію `{sid}` не знайдено.", parse_mode="Markdown")
         return
 
     await engine.cancel_all_for_session(sid)
     engine.remove_session(sid)
     await query.edit_message_text(
-        f"Сесію `{sid}` зупинено, ордер скасовано.", parse_mode="Markdown"
+        f"🛑 Сесію `{sid}` зупинено, ордер скасовано.", parse_mode="Markdown"
     )
 
 
@@ -657,7 +684,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             if shares <= 0:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Введіть ціле число більше 0.")
+            await update.message.reply_text("⚠️ Введіть ціле число більше 0.")
             return
 
         from predict_bot import WEI
@@ -678,7 +705,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             if depth <= 0 or depth > 50:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Введіть число від 1 до 50.")
+            await update.message.reply_text("⚠️ Введіть число від 1 до 50.")
             return
 
         pending_farm_depth.pop(chat_id, None)
@@ -692,11 +719,11 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         try:
             stop_at = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
             if stop_at <= datetime.now(timezone.utc):
-                await update.message.reply_text("Час має бути у майбутньому. Спробуйте ще раз.")
+                await update.message.reply_text("⚠️ Час має бути у майбутньому. Спробуйте ще раз.")
                 return
         except ValueError:
             await update.message.reply_text(
-                "Невірний формат. Введіть у форматі: `YYYY-MM-DD HH:MM`",
+                "❌ Невірний формат. Введіть у форматі: `YYYY-MM-DD HH:MM`",
                 parse_mode="Markdown",
             )
             return
@@ -741,12 +768,12 @@ async def _handle_select_outcome(query) -> None:
 
     sel = pending_selections.pop(chat_id, None)
     if not sel:
-        await query.edit_message_text("Сесія закінчилась. Виконайте /look ще раз.")
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /look ще раз.")
         return
 
     slug, title, outcomes = sel
     if idx >= len(outcomes):
-        await query.edit_message_text("Невірний вибір.")
+        await query.edit_message_text("❌ Невірний вибір.")
         return
 
     outcome = outcomes[idx]
@@ -754,7 +781,7 @@ async def _handle_select_outcome(query) -> None:
 
     if key in subscriptions:
         await query.edit_message_text(
-            f"Ви вже підписані на {outcome.name} для цієї події."
+            f"⚠️ Ви вже підписані на {outcome.name} для цієї події."
         )
         return
 
@@ -763,7 +790,7 @@ async def _handle_select_outcome(query) -> None:
         ob = await api.get_orderbook(outcome.market_id, invert=outcome.invert_book)
     except Exception as e:
         logger.error("Failed to fetch orderbook for market %s: %s", outcome.market_id, e)
-        await query.edit_message_text(f"Помилка завантаження стакану: {e}")
+        await query.edit_message_text(f"❌ Помилка завантаження стакану: {e}")
         return
 
     initial_price = ob.top_bid_price
@@ -781,15 +808,15 @@ async def _handle_select_outcome(query) -> None:
 
     price_str = f"{initial_price}" if initial_price is not None else "немає ставок"
     unsub_button = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Відписатись", callback_data=f"unsub:{outcome.market_id}:{outcome.name}")]]
+        [[InlineKeyboardButton("❌ Відписатись", callback_data=f"unsub:{outcome.market_id}:{outcome.name}")]]
     )
 
     await query.edit_message_text(
-        f"Підписка на оновлення стакану оформлена\n\n"
-        f"Подія: *{title}*\n"
-        f"Outcome: *{outcome.name}*\n"
-        f"Початкова найкраща ставка: *{price_str}*\n\n"
-        f"Ви отримаєте сповіщення при зміні ціни.",
+        f"✅ Підписка на оновлення стакану оформлена\n\n"
+        f"📊 Подія: *{title}*\n"
+        f"🎯 Outcome: *{outcome.name}*\n"
+        f"💵 Початкова найкраща ставка: *{price_str}*\n\n"
+        f"🔔 Ви отримаєте сповіщення при зміні ціни.",
         reply_markup=unsub_button,
         parse_mode="Markdown",
     )
@@ -806,10 +833,10 @@ async def _handle_unsub(query) -> None:
 
     if sub:
         await query.edit_message_text(
-            f"Відписано від {sub.category_title} → {outcome_name}."
+            f"🚫 Відписано від {sub.category_title} → {outcome_name}."
         )
     else:
-        await query.edit_message_text("Підписку не знайдено (вже видалена).")
+        await query.edit_message_text("🤷 Підписку не знайдено (вже видалена).")
 
 
 async def _handle_unwatch(query) -> None:
@@ -820,10 +847,10 @@ async def _handle_unwatch(query) -> None:
     w = wallet_watches.pop(key, None)
 
     if w:
-        await query.edit_message_text(f"Стеження за гаманцем {w.display_name} припинено.")
+        await query.edit_message_text(f"🚫 Стеження за гаманцем {w.display_name} припинено.")
     else:
         short = f"{address[:6]}...{address[-4:]}"
-        await query.edit_message_text(f"Гаманець {short} не знайдено (вже видалено).")
+        await query.edit_message_text(f"🤷 Гаманець {short} не знайдено (вже видалено).")
 
 
 async def poll_orderbooks(app: Application) -> None:
@@ -860,8 +887,10 @@ async def poll_orderbooks(app: Application) -> None:
                     diff = current_price - old_price
                     direction = "+" if diff > 0 else ""
                     change_str = f"({direction}{diff:.4f})"
+                    arrow = "📈" if diff > 0 else ("📉" if diff < 0 else "📊")
                 else:
                     change_str = "(перше значення)"
+                    arrow = "🔔"
 
                 initial_str = f"{sub.initial_price}" if sub.initial_price is not None else "—"
 
@@ -869,7 +898,7 @@ async def poll_orderbooks(app: Application) -> None:
                     [
                         [
                             InlineKeyboardButton(
-                                "Відписатись",
+                                "❌ Відписатись",
                                 callback_data=f"unsub:{sub.outcome.market_id}:{sub.outcome.name}",
                             )
                         ]
@@ -880,10 +909,10 @@ async def poll_orderbooks(app: Application) -> None:
                     await app.bot.send_message(
                         chat_id=sub.chat_id,
                         text=(
-                            f"Оновлення ціни — *{sub.category_title}*\n"
-                            f"Outcome: *{sub.outcome.name}*\n\n"
-                            f"Найкраща ставка: *{current_price}* {change_str}\n"
-                            f"Початкова: {initial_str}"
+                            f"{arrow} *{sub.category_title}*\n"
+                            f"🎯 Outcome: *{sub.outcome.name}*\n\n"
+                            f"💵 Найкраща ставка: *{current_price}* {change_str}\n"
+                            f"📌 Початкова: {initial_str}"
                         ),
                         reply_markup=unsub_button,
                         parse_mode="Markdown",
@@ -922,7 +951,7 @@ async def poll_wallets(app: Application) -> None:
             new_positions = [p for p in positions if p.uid in new_uids]
 
             unwatch_btn = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("Припинити стеження", callback_data=f"unwatch:{w.address}")]]
+                [[InlineKeyboardButton("🚫 Припинити стеження", callback_data=f"unwatch:{w.address}")]]
             )
 
             for p in new_positions:
@@ -930,12 +959,12 @@ async def poll_wallets(app: Application) -> None:
                     await app.bot.send_message(
                         chat_id=w.chat_id,
                         text=(
-                            f"Нова позиція — *{w.display_name}*\n\n"
-                            f"Подія: *{p.market_title}*\n"
-                            f"Outcome: *{p.outcome_name}*\n"
-                            f"Шейрсів: *{p.size:.2f}*\n"
-                            f"Ціна: *{p.avg_price:.4f}*\n"
-                            f"Вартість: *${p.value_usd:.2f}*"
+                            f"🆕 Нова позиція — *{w.display_name}*\n\n"
+                            f"📊 Подія: *{p.market_title}*\n"
+                            f"🎯 Outcome: *{p.outcome_name}*\n"
+                            f"🎲 Шейрсів: *{p.size:.2f}*\n"
+                            f"💵 Ціна: *{p.avg_price:.4f}*\n"
+                            f"💰 Вартість: *${p.value_usd:.2f}*"
                         ),
                         reply_markup=unwatch_btn,
                         parse_mode="Markdown",
