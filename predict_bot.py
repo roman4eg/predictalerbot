@@ -28,7 +28,7 @@ from predict_sdk import (
     Side,
 )
 
-from predict_api import PredictAPI
+from predict_api import PredictAPI, invert_orderbook
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,8 @@ class FarmingEngine:
 
     def __init__(self, api: PredictAPI, api_key: str, private_key: str,
                  predict_account: str | None = None,
-                 on_order_move=None):
+                 on_order_move=None,
+                 orderbook_ws=None):
         self.api = api
         self.api_key = api_key
         self.private_key = private_key
@@ -120,6 +121,8 @@ class FarmingEngine:
         self._poll_task: asyncio.Task | None = None
         # Async callback: on_order_move(session, old_price_cents, new_price_cents, shares)
         self.on_order_move = on_order_move
+        # Optional WebSocket orderbook (used first, REST as fallback)
+        self.orderbook_ws = orderbook_ws
 
         opts = None
         if predict_account:
@@ -132,6 +135,8 @@ class FarmingEngine:
 
     def add_session(self, session: FarmingSession) -> None:
         self.sessions[session.session_id] = session
+        if self.orderbook_ws:
+            self.orderbook_ws.subscribe(session.market_id)
         logger.info("Added farming session %s for market %s (%s)",
                      session.session_id, session.market_id, session.outcome_name)
 
@@ -139,6 +144,8 @@ class FarmingEngine:
         session = self.sessions.pop(session_id, None)
         if session:
             session.active = False
+            if self.orderbook_ws:
+                self.orderbook_ws.unsubscribe(session.market_id)
             logger.info("Removed farming session %s", session_id)
         return session
 
@@ -208,8 +215,14 @@ class FarmingEngine:
             s.active = False
             return
 
-        # Fetch orderbook (invert for secondary outcome in binary markets)
-        ob = await self.api.get_orderbook(s.market_id, invert=s.invert_book)
+        # Get orderbook: try WebSocket cache first, fall back to REST
+        ob = None
+        if self.orderbook_ws:
+            ob = self.orderbook_ws.get_orderbook(s.market_id)
+            if ob and s.invert_book:
+                ob = invert_orderbook(ob)
+        if ob is None:
+            ob = await self.api.get_orderbook(s.market_id, invert=s.invert_book)
 
         top_bid_price = ob.top_bid_price
         top_ask_price = ob.top_ask_price

@@ -17,7 +17,8 @@ from telegram.ext import (
     filters,
 )
 
-from predict_api import OrderBook, Outcome, Position, PredictAPI
+from predict_api import OrderBook, Outcome, Position, PredictAPI, invert_orderbook
+from orderbook_ws import OrderBookWS
 
 load_dotenv()
 
@@ -90,6 +91,7 @@ wallet_watches: dict[tuple[int, str], WalletWatch] = {}
 pending_selections: dict[int, tuple[str, str, list[Outcome]]] = {}
 
 api: PredictAPI | None = None
+ob_ws: OrderBookWS | None = None  # shared WebSocket orderbook client
 engine = None  # FarmingEngine | None — initialized in post_init if PRIVATE_KEY is set
 
 # Pending farming flow state: chat_id -> {slug, title, outcomes, cat_data}
@@ -856,6 +858,10 @@ async def _handle_select_outcome(query) -> None:
     )
     subscriptions[key] = sub
 
+    # Subscribe to WebSocket updates for this market
+    if ob_ws:
+        ob_ws.subscribe(outcome.market_id)
+
     price_str = f"{initial_price}" if initial_price is not None else "немає ставок"
     unsub_button = InlineKeyboardMarkup(
         [[InlineKeyboardButton("❌ Відписатись", callback_data=f"unsub:{outcome.market_id}:{outcome.name}")]]
@@ -882,6 +888,8 @@ async def _handle_unsub(query) -> None:
     sub = subscriptions.pop(key, None)
 
     if sub:
+        if ob_ws:
+            ob_ws.unsubscribe(sub.outcome.market_id)
         await query.edit_message_text(
             f"🚫 Відписано від {sub.category_title} → {outcome_name}."
         )
@@ -918,11 +926,18 @@ async def poll_orderbooks(app: Application) -> None:
             if sub is None:
                 continue
 
-            try:
-                ob = await api.get_orderbook(sub.outcome.market_id, invert=sub.outcome.invert_book)
-            except Exception as e:
-                logger.warning("Orderbook poll failed for market %s: %s", sub.outcome.market_id, e)
-                continue
+            # Try WebSocket cache first, fall back to REST
+            ob = None
+            if ob_ws:
+                ob = ob_ws.get_orderbook(sub.outcome.market_id)
+                if ob and sub.outcome.invert_book:
+                    ob = invert_orderbook(ob)
+            if ob is None:
+                try:
+                    ob = await api.get_orderbook(sub.outcome.market_id, invert=sub.outcome.invert_book)
+                except Exception as e:
+                    logger.warning("Orderbook poll failed for market %s: %s", sub.outcome.market_id, e)
+                    continue
 
             current_price = ob.top_bid_price
 
@@ -1050,9 +1065,14 @@ async def _on_order_move(session, old_price_cents, new_price_cents, shares) -> N
 
 
 async def post_init(app: Application) -> None:
-    global api, engine, _tg_app
+    global api, ob_ws, engine, _tg_app
     _tg_app = app
     api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
+
+    # Start shared WebSocket orderbook client
+    ob_ws = OrderBookWS(PREDICT_API_KEY)
+    await ob_ws.start()
+
     asyncio.create_task(poll_orderbooks(app))
     asyncio.create_task(poll_wallets(app))
 
@@ -1063,6 +1083,7 @@ async def post_init(app: Application) -> None:
             api, PREDICT_API_KEY, PRIVATE_KEY,
             predict_account=PREDICT_ACCOUNT or None,
             on_order_move=_on_order_move,
+            orderbook_ws=ob_ws,
         )
         try:
             await engine.authenticate()
@@ -1074,6 +1095,8 @@ async def post_init(app: Application) -> None:
 
 
 async def post_shutdown(app: Application) -> None:
+    if ob_ws:
+        await ob_ws.stop()
     if api:
         await api.close()
 

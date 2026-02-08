@@ -69,6 +69,28 @@ def _pick_float(d: dict, *keys: str) -> float:
     return 0.0
 
 
+def invert_orderbook(ob: OrderBook) -> OrderBook:
+    """Invert an orderbook for the secondary outcome in a binary market.
+
+    Buying outcome B at price P = selling outcome A at price (1-P),
+    so bids become inverted asks and vice versa.
+    """
+    inv_bids = sorted(
+        [[round(1 - a[0], 4), a[1]] for a in ob.asks],
+        key=lambda x: x[0], reverse=True,
+    )
+    inv_asks = sorted(
+        [[round(1 - b[0], 4), b[1]] for b in ob.bids],
+        key=lambda x: x[0],
+    )
+    return OrderBook(
+        market_id=ob.market_id,
+        bids=inv_bids,
+        asks=inv_asks,
+        update_timestamp_ms=ob.update_timestamp_ms,
+    )
+
+
 AMOUNT_DECIMALS = 18  # on-chain ERC1155 conditional tokens use 18 decimals
 
 
@@ -106,28 +128,13 @@ class PredictAPI:
         resp = await self.client.get(f"/v1/markets/{market_id}/orderbook")
         resp.raise_for_status()
         data = resp.json()["data"]
-        bids = data.get("bids", [])
-        asks = data.get("asks", [])
-
-        if invert:
-            # For the secondary outcome in a binary market:
-            # buying B at price P = selling A at price (1-P)
-            inv_bids = sorted(
-                [[round(1 - a[0], 4), a[1]] for a in asks],
-                key=lambda x: x[0], reverse=True,
-            )
-            inv_asks = sorted(
-                [[round(1 - b[0], 4), b[1]] for b in bids],
-                key=lambda x: x[0],
-            )
-            bids, asks = inv_bids, inv_asks
-
-        return OrderBook(
+        ob = OrderBook(
             market_id=data["marketId"],
-            bids=bids,
-            asks=asks,
+            bids=data.get("bids", []),
+            asks=data.get("asks", []),
             update_timestamp_ms=data.get("updateTimestampMs", 0),
         )
+        return invert_orderbook(ob) if invert else ob
 
     async def get_positions_by_address(self, address: str) -> list[Position]:
         positions: list[Position] = []

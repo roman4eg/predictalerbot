@@ -11,8 +11,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from predict_api import PredictAPI
+from predict_api import PredictAPI, invert_orderbook
 from predict_bot import FarmingEngine, FarmingSession, WEI
+from orderbook_ws import OrderBookWS
 
 load_dotenv()
 
@@ -48,6 +49,7 @@ PROXY_URL = _parse_proxy()
 STATIC_DIR = Path(__file__).parent / "static"
 
 api: PredictAPI | None = None
+ob_ws: OrderBookWS | None = None
 engine: FarmingEngine | None = None
 
 app = FastAPI(title="Predict.fun Farming Bot")
@@ -55,13 +57,18 @@ app = FastAPI(title="Predict.fun Farming Bot")
 
 @app.on_event("startup")
 async def startup():
-    global api, engine
+    global api, ob_ws, engine
     api = PredictAPI(PREDICT_API_KEY, proxy=PROXY_URL)
     if PROXY_URL:
         logger.info("Using proxy: %s", PROXY_URL.split("@")[-1])
+
+    ob_ws = OrderBookWS(PREDICT_API_KEY)
+    await ob_ws.start()
+
     engine = FarmingEngine(
         api, PREDICT_API_KEY, PRIVATE_KEY,
         predict_account=PREDICT_ACCOUNT or None,
+        orderbook_ws=ob_ws,
     )
     await engine.authenticate()
     engine.start()
@@ -70,6 +77,8 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    if ob_ws:
+        await ob_ws.stop()
     if api:
         await api.close()
 
@@ -126,7 +135,14 @@ async def get_balance():
 async def get_orderbook(market_id: int, invert: bool = False):
     """Get current orderbook top bid/ask for a market."""
     try:
-        ob = await api.get_orderbook(market_id, invert=invert)
+        # Try WebSocket cache first, fall back to REST
+        ob = None
+        if ob_ws:
+            ob = ob_ws.get_orderbook(market_id)
+            if ob and invert:
+                ob = invert_orderbook(ob)
+        if ob is None:
+            ob = await api.get_orderbook(market_id, invert=invert)
         return {
             "market_id": ob.market_id,
             "top_bid": ob.top_bid_price,
