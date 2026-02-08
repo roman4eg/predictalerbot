@@ -282,100 +282,129 @@ class FarmingEngine:
         price_wei = _cents_to_wei(price_cents)
 
         # Always recalculate shares from balance at the current price.
-        # If price moves up — fewer shares; if down — more shares.
         try:
             balance_wei = await self.builder.balance_of_async("USDT")
-            if price_wei > 0:
-                quantity_wei = (balance_wei * WEI) // price_wei
-            else:
-                quantity_wei = 0
-            if quantity_wei <= 0:
-                s.error = "Insufficient balance"
-                return
-            logger.info("Session %s: calculated %d shares from balance (price %d¢)",
-                        s.session_id, quantity_wei // WEI, price_cents)
         except Exception as e:
             s.error = f"Balance check failed: {e}"
             logger.warning("Session %s: balance check failed: %s", s.session_id, e)
             return
 
-        amounts = self.builder.get_limit_order_amounts(
-            LimitHelperInput(
-                side=Side(s.side),
-                price_per_share_wei=price_wei,
-                quantity_wei=quantity_wei,
+        # Try placing; on CollateralPerMarketExceededError retry with amountAvailable
+        for attempt in range(2):
+            if price_wei <= 0:
+                s.error = "Invalid price"
+                return
+
+            # 98% safety margin to avoid rounding / fee boundary issues
+            effective_balance = balance_wei * 98 // 100
+            quantity_wei = (effective_balance * WEI) // price_wei
+            if quantity_wei <= 0:
+                s.error = "Insufficient balance"
+                return
+
+            logger.info("Session %s: calculated %d shares from balance (price %d¢)",
+                        s.session_id, quantity_wei // WEI, price_cents)
+
+            amounts = self.builder.get_limit_order_amounts(
+                LimitHelperInput(
+                    side=Side(s.side),
+                    price_per_share_wei=price_wei,
+                    quantity_wei=quantity_wei,
+                )
             )
-        )
 
-        order = self.builder.build_order(
-            "LIMIT",
-            BuildOrderInput(
-                side=Side(s.side),
-                token_id=s.token_id,
-                maker_amount=str(amounts.maker_amount),
-                taker_amount=str(amounts.taker_amount),
-                fee_rate_bps=s.fee_rate_bps,
-            ),
-        )
+            order = self.builder.build_order(
+                "LIMIT",
+                BuildOrderInput(
+                    side=Side(s.side),
+                    token_id=s.token_id,
+                    maker_amount=str(amounts.maker_amount),
+                    taker_amount=str(amounts.taker_amount),
+                    fee_rate_bps=s.fee_rate_bps,
+                ),
+            )
 
-        typed_data = self.builder.build_typed_data(
-            order,
-            is_neg_risk=s.is_neg_risk,
-            is_yield_bearing=s.is_yield_bearing,
-        )
-        signed = self.builder.sign_typed_data_order(typed_data)
-        order_hash = self.builder.build_typed_data_hash(typed_data)
+            typed_data = self.builder.build_typed_data(
+                order,
+                is_neg_risk=s.is_neg_risk,
+                is_yield_bearing=s.is_yield_bearing,
+            )
+            signed = self.builder.sign_typed_data_order(typed_data)
+            order_hash = self.builder.build_typed_data_hash(typed_data)
 
-        price_per_share = str(price_wei)
-
-        payload = {
-            "data": {
-                "pricePerShare": price_per_share,
-                "strategy": "LIMIT",
-                "order": {
-                    "hash": order_hash,
-                    "salt": signed.salt,
-                    "maker": signed.maker,
-                    "signer": signed.signer,
-                    "taker": signed.taker,
-                    "tokenId": signed.token_id,
-                    "makerAmount": signed.maker_amount,
-                    "takerAmount": signed.taker_amount,
-                    "expiration": signed.expiration,
-                    "nonce": signed.nonce,
-                    "feeRateBps": signed.fee_rate_bps,
-                    "side": signed.side,
-                    "signatureType": signed.signature_type,
-                    "signature": signed.signature,
-                },
+            payload = {
+                "data": {
+                    "pricePerShare": str(price_wei),
+                    "strategy": "LIMIT",
+                    "order": {
+                        "hash": order_hash,
+                        "salt": signed.salt,
+                        "maker": signed.maker,
+                        "signer": signed.signer,
+                        "taker": signed.taker,
+                        "tokenId": signed.token_id,
+                        "makerAmount": signed.maker_amount,
+                        "takerAmount": signed.taker_amount,
+                        "expiration": signed.expiration,
+                        "nonce": signed.nonce,
+                        "feeRateBps": signed.fee_rate_bps,
+                        "side": signed.side,
+                        "signatureType": signed.signature_type,
+                        "signature": signed.signature,
+                    },
+                }
             }
-        }
 
-        resp = await self.api.client.post("/v1/orders", json=payload)
-        if resp.status_code >= 400:
-            logger.error("Order placement failed (%s): %s", resp.status_code, resp.text)
-        resp.raise_for_status()
+            resp = await self.api.client.post("/v1/orders", json=payload)
 
-        resp_data = resp.json().get("data", {})
-        s.current_order_hash = resp_data.get("orderHash") or order_hash
+            # Handle 400 errors gracefully (especially collateral limits)
+            if resp.status_code == 400:
+                try:
+                    error_body = resp.json().get("error", {})
+                except Exception:
+                    error_body = {}
+                tag = error_body.get("_tag", "")
 
-        # Fetch numeric order id via GET /v1/orders/{hash}
-        # (POST /v1/orders only returns hash, but /v1/orders/remove needs numeric id)
-        try:
-            id_resp = await self.api.client.get(f"/v1/orders/{s.current_order_hash}")
-            id_resp.raise_for_status()
-            s.current_order_id = id_resp.json().get("data", {}).get("id")
-        except Exception as e:
-            logger.warning("Could not fetch order id for %s: %s", s.current_order_hash[:12], e)
-            s.current_order_id = None
+                # On collateral-per-market error, retry once with the actual available amount
+                if tag == "CollateralPerMarketExceededError" and attempt == 0:
+                    available = error_body.get("amountAvailable")
+                    if available:
+                        balance_wei = int(available)
+                        logger.info("Session %s: collateral per-market limit, retrying with available %.2f USDT",
+                                    s.session_id, balance_wei / WEI)
+                        continue
 
-        s.current_order_price_cents = price_cents
-        s.last_placed_shares = quantity_wei // WEI
-        s.placed_count += 1
+                desc = error_body.get("description", resp.text)
+                s.error = desc
+                logger.error("Order placement failed (%s): %s", resp.status_code, resp.text)
+                return
 
-        logger.info("Session %s: placed %s order at %d¢ (id: %s, hash: %s)",
-                     s.session_id, "BUY" if s.side == 0 else "SELL",
-                     price_cents, s.current_order_id or "?", s.current_order_hash[:12])
+            if resp.status_code >= 400:
+                logger.error("Order placement failed (%s): %s", resp.status_code, resp.text)
+                resp.raise_for_status()
+
+            # --- Success ---
+            resp_data = resp.json().get("data", {})
+            s.current_order_hash = resp_data.get("orderHash") or order_hash
+
+            # Fetch numeric order id via GET /v1/orders/{hash}
+            # (POST /v1/orders only returns hash, but /v1/orders/remove needs numeric id)
+            try:
+                id_resp = await self.api.client.get(f"/v1/orders/{s.current_order_hash}")
+                id_resp.raise_for_status()
+                s.current_order_id = id_resp.json().get("data", {}).get("id")
+            except Exception as e:
+                logger.warning("Could not fetch order id for %s: %s", s.current_order_hash[:12], e)
+                s.current_order_id = None
+
+            s.current_order_price_cents = price_cents
+            s.last_placed_shares = quantity_wei // WEI
+            s.placed_count += 1
+
+            logger.info("Session %s: placed %s order at %d¢ (id: %s, hash: %s)",
+                         s.session_id, "BUY" if s.side == 0 else "SELL",
+                         price_cents, s.current_order_id or "?", s.current_order_hash[:12])
+            return
 
     async def _cancel_current_order(self, s: FarmingSession) -> None:
         if s.current_order_id is None and s.current_order_hash is None:
