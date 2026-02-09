@@ -36,6 +36,10 @@ WALLET_POLL_INTERVAL = int(os.getenv("WALLET_POLL_INTERVAL", "30"))
 PRIVATE_KEY = os.getenv("WALLET_PRIVATE_KEY", "")
 PREDICT_ACCOUNT = os.getenv("PREDICT_ACCOUNT", "")
 
+# Whitelist of Telegram user IDs allowed to use the bot (comma-separated in .env)
+_raw_users = os.getenv("ALLOWED_USERS", "").strip()
+ALLOWED_USERS: set[int] = {int(uid) for uid in _raw_users.split(",") if uid.strip().isdigit()}
+
 
 def _parse_proxy() -> str | None:
     raw = os.getenv("PROXY", "").strip()
@@ -853,6 +857,9 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    if ALLOWED_USERS and query.from_user.id not in ALLOWED_USERS:
+        await query.answer()
+        return
     await query.answer()
     data = query.data
 
@@ -1183,18 +1190,26 @@ def main() -> None:
         .build()
     )
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("look", cmd_look))
-    app.add_handler(CommandHandler("subs", cmd_subs))
-    app.add_handler(CommandHandler("watch", cmd_watch))
-    app.add_handler(CommandHandler("wallets", cmd_wallets))
-    app.add_handler(CommandHandler("farm", cmd_farm))
-    app.add_handler(CommandHandler("sessions", cmd_sessions))
-    app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(CommandHandler("balance", cmd_balance))
-    app.add_handler(CommandHandler("stats", cmd_stats))
+    # User whitelist filter — if ALLOWED_USERS is set, only those users can interact
+    if ALLOWED_USERS:
+        user_filter = filters.User(user_id=ALLOWED_USERS)
+        logger.info("User whitelist active: %s", ALLOWED_USERS)
+    else:
+        user_filter = filters.ALL
+        logger.warning("No ALLOWED_USERS set — bot is open to everyone!")
+
+    app.add_handler(CommandHandler("start", cmd_start, user_filter))
+    app.add_handler(CommandHandler("look", cmd_look, user_filter))
+    app.add_handler(CommandHandler("subs", cmd_subs, user_filter))
+    app.add_handler(CommandHandler("watch", cmd_watch, user_filter))
+    app.add_handler(CommandHandler("wallets", cmd_wallets, user_filter))
+    app.add_handler(CommandHandler("farm", cmd_farm, user_filter))
+    app.add_handler(CommandHandler("sessions", cmd_sessions, user_filter))
+    app.add_handler(CommandHandler("stop", cmd_stop, user_filter))
+    app.add_handler(CommandHandler("balance", cmd_balance, user_filter))
+    app.add_handler(CommandHandler("stats", cmd_stats, user_filter))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(user_filter & filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     logger.info("Bot started. Polling interval: %ds", POLL_INTERVAL)
     app.run_polling()
