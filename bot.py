@@ -4,7 +4,7 @@ import os
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -108,8 +108,12 @@ pending_farm_shares: dict[int, dict] = {}
 pending_farm_depth: dict[int, dict] = {}
 # Pending stop_at input: chat_id -> config dict (after depth chosen)
 pending_farm_stop: dict[int, dict] = {}
+# Pending spread input: chat_id -> config dict (after depth chosen)
+pending_farm_spread: dict[int, dict] = {}
 # Pending notify input: chat_id -> config dict (after stop chosen)
 pending_farm_notify: dict[int, dict] = {}
+# Pending start_at input (postfarm): chat_id -> config dict (after notify chosen)
+pending_farm_start: dict[int, dict] = {}
 # Telegram app reference for sending notifications from engine callback
 _tg_app: Application | None = None
 
@@ -145,9 +149,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         text += (
             "\n🤖 *Фармінг:*\n"
             "🚀 /farm <URL> — створити фармінг-сесію\n"
+            "⏰ /postfarm <URL> — відкладений фармінг\n"
             "📋 /sessions — активні фармінг-сесії\n"
             "🛑 /stop <id> — зупинити сесію\n"
             "💰 /balance — баланс USDT\n"
+            "📊 /stats — статистика фармінгу\n"
         )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -306,12 +312,15 @@ async def cmd_wallets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # --------------- Farming commands ---------------
 
-async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _start_farm_flow(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                           is_postfarm: bool = False) -> None:
+    """Shared logic for /farm and /postfarm commands."""
     if engine is None:
         await update.message.reply_text("⚠️ Фармінг не налаштовано. Додайте WALLET_PRIVATE_KEY в .env")
         return
+    cmd = "/postfarm" if is_postfarm else "/farm"
     if not context.args:
-        await update.message.reply_text("ℹ️ Використання: /farm <посилання на подію predict.fun>")
+        await update.message.reply_text(f"ℹ️ Використання: {cmd} <посилання на подію predict.fun>")
         return
 
     url = context.args[0]
@@ -336,17 +345,28 @@ async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     pending_farm[update.effective_chat.id] = {
         "slug": slug, "title": title, "outcomes": outcomes,
         "cat_data": cat_data, "markets": markets,
+        "is_postfarm": is_postfarm,
     }
 
     buttons = []
     for i, o in enumerate(outcomes):
         buttons.append([InlineKeyboardButton(f"🎯 {o.name}", callback_data=f"farm_outcome:{i}")])
 
+    label = "відкладеного фармінгу" if is_postfarm else "фармінгу"
+    emoji = "⏰" if is_postfarm else "🚀"
     await update.message.reply_text(
-        f"🚀 *{title}*\n\nОберіть outcome для фармінгу:",
+        f"{emoji} *{title}*\n\nОберіть outcome для {label}:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown",
     )
+
+
+async def cmd_farm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _start_farm_flow(update, context, is_postfarm=False)
+
+
+async def cmd_postfarm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _start_farm_flow(update, context, is_postfarm=True)
 
 
 async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -361,7 +381,9 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     lines = []
     buttons = []
     for s in engine.sessions.values():
-        if s.active and not s.is_expired:
+        if s.is_waiting:
+            status = "⏳ Очікує старту"
+        elif s.active and not s.is_expired:
             status = "🟢 Активна"
         elif s.is_expired:
             status = "🔴 Дедлайн"
@@ -379,8 +401,10 @@ async def cmd_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ) else 0
         liq_str = f"${liq:.2f}" if liq else "—"
 
-        # Time remaining
-        if s.stop_at:
+        # Time remaining / start time
+        if s.start_at and s.is_waiting:
+            time_str = f"⏰ Старт: *{s.start_at.strftime('%Y-%m-%d %H:%M')} UTC*"
+        elif s.stop_at:
             time_str = f"⏱ Залишилось: *{_fmt_remaining(s.stop_at)}*"
         else:
             time_str = "⏱ Без обмеження часу"
@@ -447,8 +471,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if storage is None:
         await update.message.reply_text("⚠️ Фармінг не налаштовано.")
         return
-
-    from datetime import timedelta
 
     lines = ["📊 *Статистика фармінгу*\n"]
 
@@ -543,6 +565,7 @@ async def _handle_farm_outcome(query) -> None:
         "target_cents": target_cents,
         "balance": balance,
         "max_shares": max_shares,
+        "is_postfarm": farm_data.get("is_postfarm", False),
     }
     pending_farm_shares[chat_id] = config
 
@@ -582,11 +605,30 @@ def _show_depth_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, InlineKeyboardMarkup(buttons)
 
 
+def _show_spread_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
+    """Build message + buttons for max spread selection step."""
+    text = (
+        f"🎯 *{config['title']}* → *{config['outcome'].name}*\n"
+        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц*\n\n"
+        f"📐 Оберіть максимальний спред (центів):"
+    )
+    buttons = [
+        [
+            InlineKeyboardButton("2ц", callback_data="farm_spread:2"),
+            InlineKeyboardButton("3ц", callback_data="farm_spread:3"),
+            InlineKeyboardButton("5ц", callback_data="farm_spread:5"),
+            InlineKeyboardButton("10ц", callback_data="farm_spread:10"),
+        ],
+        [InlineKeyboardButton("✏️ Ввести вручну", callback_data="farm_spread:manual")],
+    ]
+    return text, InlineKeyboardMarkup(buttons)
+
+
 def _show_stop_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     """Build message + buttons for stop-at selection step."""
     text = (
         f"🎯 *{config['title']}* → *{config['outcome'].name}*\n"
-        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц*\n\n"
+        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц* | 📐 Спред: *{config['max_spread_cents']}ц*\n\n"
         f"⏱ Встановити час зупинки (UTC)?\n"
         f"Формат: `YYYY-MM-DD HH:MM`"
     )
@@ -602,7 +644,7 @@ def _show_notify_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
     stop_str = config["stop_at"].strftime("%Y-%m-%d %H:%M UTC") if config.get("stop_at") else "без обмеження"
     text = (
         f"🎯 *{config['title']}* → *{config['outcome'].name}*\n"
-        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц*\n"
+        f"🎲 Шейрсів: *{config['shares_str']}* | 📏 Глибина: *{config['depth_cents']}ц* | 📐 Спред: *{config['max_spread_cents']}ц*\n"
         f"⏱ Зупинка: *{stop_str}*\n\n"
         f"🔔 Надсилати сповіщення при перестановці ордерів?"
     )
@@ -611,6 +653,16 @@ def _show_notify_buttons(config: dict) -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton("🔕 Ні, без сповіщень", callback_data="farm_notify:no")],
     ]
     return text, InlineKeyboardMarkup(buttons)
+
+
+async def _advance_to_spread(chat_id: int, config: dict, query=None, message=None) -> None:
+    """Move to max spread selection step."""
+    pending_farm_spread[chat_id] = config
+    text, markup = _show_spread_buttons(config)
+    if query:
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="Markdown")
+    elif message:
+        await message.reply_text(text, reply_markup=markup, parse_mode="Markdown")
 
 
 async def _advance_to_notify(chat_id: int, config: dict, query=None, message=None) -> None:
@@ -632,7 +684,9 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
     market = config["market"]
     shares_wei = config.get("shares_wei", 0)
     depth_cents = config.get("depth_cents", 1)
+    max_spread_cents = config.get("max_spread_cents", 3)
     stop_at = config.get("stop_at")
+    start_at = config.get("start_at")
     notify_moves = config.get("notify_moves", False)
 
     session = FarmingSession(
@@ -643,7 +697,7 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
         outcome_name=outcome.name,
         side=0,  # BUY
         shares_wei=shares_wei,
-        max_spread_cents=3,
+        max_spread_cents=max_spread_cents,
         depth_cents=depth_cents,
         stop_at=stop_at,
         is_neg_risk=cat_data.get("isNegRisk", False),
@@ -652,6 +706,7 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
         invert_book=outcome.invert_book,
         notify_moves=notify_moves,
         chat_id=chat_id,
+        start_at=start_at,
     )
 
     engine.add_session(session)
@@ -659,19 +714,27 @@ async def _create_farm_session(chat_id: int, config: dict) -> str:
     shares_str = config.get("shares_str", str(shares_wei))
     stop_str = stop_at.strftime("%Y-%m-%d %H:%M UTC") if stop_at else "без обмеження"
     notify_str = "🔔 увімкнено" if notify_moves else "🔕 вимкнено"
-    return (
-        f"✅ *Фармінг-сесію створено!*\n\n"
-        f"🏷 ID: `{session.session_id}`\n"
-        f"📊 Подія: *{config['title']}*\n"
-        f"🎯 Outcome: *{outcome.name}*\n"
-        f"🎲 Шейрсів: *{shares_str}*\n"
-        f"📏 Глибина: *{depth_cents}ц* | Спред: *3ц*\n"
-        f"⏱ Зупинка: *{stop_str}*\n"
-        f"📨 Сповіщення: *{notify_str}*\n\n"
-        f"🤖 Бот почне працювати протягом кількох секунд.\n"
-        f"📋 Перевірити: /sessions\n"
-        f"🛑 Зупинити: /stop {session.session_id}"
-    )
+    start_str = start_at.strftime("%Y-%m-%d %H:%M UTC") if start_at else None
+
+    lines = [
+        f"✅ *Фармінг-сесію створено!*\n",
+        f"🏷 ID: `{session.session_id}`",
+        f"📊 Подія: *{config['title']}*",
+        f"🎯 Outcome: *{outcome.name}*",
+        f"🎲 Шейрсів: *{shares_str}*",
+        f"📏 Глибина: *{depth_cents}ц* | 📐 Спред: *{max_spread_cents}ц*",
+        f"⏱ Зупинка: *{stop_str}*",
+    ]
+    if start_str:
+        lines.append(f"⏰ Старт: *{start_str}*")
+    lines += [
+        f"📨 Сповіщення: *{notify_str}*",
+        "",
+        f"🤖 Бот почне працювати протягом кількох секунд." if not start_at else f"🤖 Бот почне працювати о *{start_str}*.",
+        f"📋 Перевірити: /sessions",
+        f"🛑 Зупинити: /stop {session.session_id}",
+    ]
+    return "\n".join(lines)
 
 
 async def _advance_to_depth(chat_id: int, config: dict, query) -> None:
@@ -734,6 +797,25 @@ async def _handle_farm_depth(query) -> None:
         return
 
     config["depth_cents"] = int(val)
+    await _advance_to_spread(chat_id, config, query=query)
+
+
+async def _handle_farm_spread(query) -> None:
+    """User selected max spread value."""
+    chat_id = query.message.chat_id
+    val = query.data.split(":")[1]
+
+    config = pending_farm_spread.pop(chat_id, None)
+    if not config:
+        await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
+        return
+
+    if val == "manual":
+        pending_farm_spread[chat_id] = config
+        await query.edit_message_text("✏️ Введіть максимальний спред (центів), наприклад: 5")
+        return
+
+    config["max_spread_cents"] = int(val)
     await _advance_to_stop(chat_id, config, query=query)
 
 
@@ -757,10 +839,27 @@ async def _handle_farm_setstop(query) -> None:
         await query.edit_message_text("⏰ Сесія закінчилась. Виконайте /farm ще раз.")
         return
 
+    example_dt = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
     await query.edit_message_text(
-        "⏱ Введіть час зупинки (UTC).\nФормат: `YYYY-MM-DD HH:MM`\nНаприклад: `2026-02-08 15:30`",
+        f"⏱ Введіть час зупинки (UTC).\nФормат: `YYYY-MM-DD HH:MM`\nНаприклад: `{example_dt}`",
         parse_mode="Markdown",
     )
+
+
+async def _advance_to_start(chat_id: int, config: dict, query=None, message=None) -> None:
+    """Move to start datetime input step (postfarm only)."""
+    pending_farm_start[chat_id] = config
+    example_dt = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%d %H:%M")
+    text = (
+        f"🎯 *{config['title']}* → *{config['outcome'].name}*\n\n"
+        f"⏰ Введіть дату та час старту фармінгу (UTC).\n"
+        f"Формат: `YYYY-MM-DD HH:MM`\n"
+        f"Наприклад: `{example_dt}`"
+    )
+    if query:
+        await query.edit_message_text(text, parse_mode="Markdown")
+    elif message:
+        await message.reply_text(text, parse_mode="Markdown")
 
 
 async def _handle_farm_notify(query) -> None:
@@ -774,8 +873,12 @@ async def _handle_farm_notify(query) -> None:
         return
 
     config["notify_moves"] = val == "yes"
-    text = await _create_farm_session(chat_id, config)
-    await query.edit_message_text(text, parse_mode="Markdown")
+
+    if config.get("is_postfarm"):
+        await _advance_to_start(chat_id, config, query=query)
+    else:
+        text = await _create_farm_session(chat_id, config)
+        await query.edit_message_text(text, parse_mode="Markdown")
 
 
 async def _handle_farm_stop(query) -> None:
@@ -831,6 +934,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         pending_farm_depth.pop(chat_id, None)
         config["depth_cents"] = depth
+        await _advance_to_spread(chat_id, config, message=update.message)
+        return
+
+    # Step: spread input (manual)
+    if chat_id in pending_farm_spread:
+        config = pending_farm_spread.get(chat_id)
+        try:
+            spread = int(text)
+            if spread <= 0 or spread > 50:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("⚠️ Введіть число від 1 до 50.")
+            return
+
+        pending_farm_spread.pop(chat_id, None)
+        config["max_spread_cents"] = spread
         await _advance_to_stop(chat_id, config, message=update.message)
         return
 
@@ -852,6 +971,27 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         pending_farm_stop.pop(chat_id, None)
         config["stop_at"] = stop_at
         await _advance_to_notify(chat_id, config, message=update.message)
+        return
+
+    # Step: start_at input (postfarm)
+    if chat_id in pending_farm_start:
+        config = pending_farm_start.get(chat_id)
+        try:
+            start_at = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            if start_at <= datetime.now(timezone.utc):
+                await update.message.reply_text("⚠️ Час має бути у майбутньому. Спробуйте ще раз.")
+                return
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Невірний формат. Введіть у форматі: `YYYY-MM-DD HH:MM`",
+                parse_mode="Markdown",
+            )
+            return
+
+        pending_farm_start.pop(chat_id, None)
+        config["start_at"] = start_at
+        result_text = await _create_farm_session(chat_id, config)
+        await update.message.reply_text(result_text, parse_mode="Markdown")
         return
 
 
@@ -877,6 +1017,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _handle_farm_manual(query)
     elif data.startswith("farm_depth:"):
         await _handle_farm_depth(query)
+    elif data.startswith("farm_spread:"):
+        await _handle_farm_spread(query)
     elif data == "farm_nostop":
         await _handle_farm_nostop(query)
     elif data == "farm_setstop":
@@ -1204,6 +1346,7 @@ def main() -> None:
     app.add_handler(CommandHandler("watch", cmd_watch, user_filter))
     app.add_handler(CommandHandler("wallets", cmd_wallets, user_filter))
     app.add_handler(CommandHandler("farm", cmd_farm, user_filter))
+    app.add_handler(CommandHandler("postfarm", cmd_postfarm, user_filter))
     app.add_handler(CommandHandler("sessions", cmd_sessions, user_filter))
     app.add_handler(CommandHandler("stop", cmd_stop, user_filter))
     app.add_handler(CommandHandler("balance", cmd_balance, user_filter))

@@ -53,6 +53,7 @@ class FarmingSession:
     invert_book: bool = False  # invert orderbook for secondary outcome in binary markets
     notify_moves: bool = False  # send Telegram notification on order moves
     chat_id: int = 0  # Telegram chat_id for notifications
+    start_at: datetime | None = None  # when to start farming (UTC), None = immediately
 
     # Runtime state
     active: bool = True
@@ -74,6 +75,12 @@ class FarmingSession:
             return False
         return datetime.now(timezone.utc) >= self.stop_at
 
+    @property
+    def is_waiting(self) -> bool:
+        if self.start_at is None:
+            return False
+        return datetime.now(timezone.utc) < self.start_at
+
     def to_dict(self) -> dict:
         return {
             "session_id": self.session_id,
@@ -85,6 +92,7 @@ class FarmingSession:
             "max_spread_cents": self.max_spread_cents,
             "depth_cents": self.depth_cents,
             "stop_at": self.stop_at.isoformat() if self.stop_at else None,
+            "start_at": self.start_at.isoformat() if self.start_at else None,
             "active": self.active,
             "is_expired": self.is_expired,
             "current_order_hash": self.current_order_hash,
@@ -213,6 +221,10 @@ class FarmingEngine:
                     logger.info("Skipping expired session %s", d["session_id"])
                     continue
 
+            start_at = None
+            if d.get("start_at"):
+                start_at = datetime.fromisoformat(d["start_at"])
+
             session = FarmingSession(
                 session_id=d["session_id"],
                 market_id=d["market_id"],
@@ -230,6 +242,7 @@ class FarmingEngine:
                 invert_book=d.get("invert_book", False),
                 notify_moves=d.get("notify_moves", False),
                 chat_id=d.get("chat_id", 0),
+                start_at=start_at,
             )
 
             # Cancel orphaned order from before restart
@@ -285,6 +298,10 @@ class FarmingEngine:
             )
 
     async def _tick(self, s: FarmingSession) -> None:
+        # Check if session hasn't started yet (postfarm)
+        if s.is_waiting:
+            return
+
         # Check deadline
         if s.is_expired:
             logger.info("Session %s expired (cutoff reached), cancelling order", s.session_id)

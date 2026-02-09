@@ -170,6 +170,10 @@ async def create_session(request: Request):
     if body.get("stop_at"):
         stop_at = datetime.fromisoformat(body["stop_at"]).replace(tzinfo=timezone.utc)
 
+    start_at = None
+    if body.get("start_at"):
+        start_at = datetime.fromisoformat(body["start_at"]).replace(tzinfo=timezone.utc)
+
     shares = float(body.get("shares", 0))
     use_max = body.get("use_max", False)
     shares_wei = 0 if use_max else int(shares * WEI)
@@ -189,6 +193,7 @@ async def create_session(request: Request):
         is_yield_bearing=body.get("is_yield_bearing", False),
         fee_rate_bps=int(body.get("fee_rate_bps", 0)),
         invert_book=body.get("invert_book", False),
+        start_at=start_at,
     )
 
     engine.add_session(session)

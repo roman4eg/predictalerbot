@@ -84,6 +84,7 @@ class Storage:
                 "is_yield_bearing": s.is_yield_bearing,
                 "fee_rate_bps": s.fee_rate_bps,
                 "invert_book": s.invert_book,
+                "start_at": s.start_at.isoformat() if s.start_at else None,
                 "notify_moves": s.notify_moves,
                 "chat_id": s.chat_id,
                 # Runtime state for orphan recovery on restart
