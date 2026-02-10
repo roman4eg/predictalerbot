@@ -342,8 +342,15 @@ class FarmingEngine:
 
         # Check if spread is within the allowed threshold
         if spread_cents > s.max_spread_cents * 2:
-            s.error = f"Spread {spread_cents}¢ exceeds max ±{s.max_spread_cents}¢"
+            logger.info("Session %s: spread %d¢ exceeds max ±%d¢, stopping session",
+                        s.session_id, spread_cents, s.max_spread_cents)
+            self._record_completed_order(s)
             await self._cancel_current_order(s)
+            s.active = False
+            s.error = f"Spread {spread_cents}¢ exceeds max ±{s.max_spread_cents}¢"
+            if self.orderbook_ws:
+                self.orderbook_ws.unsubscribe(s.market_id)
+            self._persist()
             return
 
         s.error = None
