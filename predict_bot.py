@@ -308,6 +308,8 @@ class FarmingEngine:
             self._record_completed_order(s)
             await self._cancel_current_order(s)
             s.active = False
+            if self.orderbook_ws:
+                self.orderbook_ws.unsubscribe(s.market_id)
             self._persist()
             return
 
